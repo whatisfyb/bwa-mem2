@@ -55,6 +55,9 @@ Authors: Vasimuddin Md <vasimuddin.md@intel.com>; Sanchit Misra <sanchit.misra@i
 
 #define MAX_LINE_LEN 256
 #define CACHE_LINE 16        // 16 INT32
+#ifndef CACHE_LINE_BYTES
+#define CACHE_LINE_BYTES 64  // 64 bytes on x86; overridden to 128 on ARM via Makefile
+#endif
 #define ALIGN_OFF 1
 
 #define MAX_THREADS 256
