@@ -1967,3 +1967,71 @@ int main(int argc, char *argv[])
     return 1;
 }
 #endif  // MAINY
+
+/*
+ * ARM NEON stub implementations for kswv::getScores8/16
+ * These are called from bwamem_pair.cpp mem_sam_pe_batch().
+ * On x86, these are AVX512 implementations. On ARM, we use a
+ * scalar per-pair fallback using ksw_align2.
+ * TODO: Phase 2 - implement native NEON optimized versions.
+ */
+#if defined(__ARM_NEON) || defined(__aarch64__)
+extern "C" {
+#include "ksw.h"
+}
+
+void kswv::getScores8(SeqPair *pairArray,
+                      uint8_t *seqBufRef,
+                      uint8_t *seqBufQer,
+                      kswr_t* aln,
+                      int32_t numPairs,
+                      uint16_t numThreads,
+                      int phase)
+{
+    /* Scalar fallback: process pairs one by one using ksw_align2 */
+    int8_t mat[25];
+    /* Fill scoring matrix: match=w_match, mismatch=w_mismatch */
+    memset(mat, 0, 25);
+    for (int i = 0; i < 4; i++) {
+        for (int j = 0; j < 4; j++) {
+            mat[i * 5 + j] = (i == j) ? w_match : w_mismatch;
+        }
+        mat[i * 5 + 4] = w_mismatch;  /* ambiguous base */
+        mat[4 * 5 + i] = w_mismatch;
+    }
+    mat[24] = w_mismatch;
+
+    for (int i = 0; i < numPairs; i++) {
+        SeqPair *p = pairArray + i;
+        kswr_t *myaln = aln + p->regid;
+
+        uint8_t *target = seqBufRef + p->idr;
+        uint8_t *query = seqBufQer + p->idq;
+        int xtra = p->h0;
+
+        kswr_t r = ksw_align2(p->len2, query, p->len1, target, 5,
+                               mat, o_del, e_del, o_ins, e_ins, xtra, 0);
+
+        if (phase) {
+            if (myaln->score == r.score) {
+                myaln->tb = myaln->te - r.te;
+                myaln->qb = myaln->qe - r.qe;
+            }
+        } else {
+            *myaln = r;
+        }
+    }
+}
+
+void kswv::getScores16(SeqPair *pairArray,
+                       uint8_t *seqBufRef,
+                       uint8_t *seqBufQer,
+                       kswr_t* aln,
+                       int32_t numPairs,
+                       uint16_t numThreads,
+                       int phase)
+{
+    /* Same scalar fallback for 16-bit path */
+    getScores8(pairArray, seqBufRef, seqBufQer, aln, numPairs, numThreads, phase);
+}
+#endif /* __ARM_NEON || __aarch64__ */
