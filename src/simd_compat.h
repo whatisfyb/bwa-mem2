@@ -114,12 +114,8 @@ static inline uint64_t __rdtsc(void)
 #endif
 
 #else
-/* x86 path: use standard intrinsics */
-#if __AVX512BW__ || __AVX2__
+/* x86 path: include full intrinsics header for __rdtsc and all SIMD ops */
 #include <immintrin.h>
-#else
-#include <smmintrin.h>
-#endif
 #endif /* __ARM_NEON || __aarch64__ */
 
 #endif /* SIMD_COMPAT_H */
