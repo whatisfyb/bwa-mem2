@@ -38,11 +38,30 @@ ifeq ($(CXX), icpc)
 	CC= icc
 else ifeq ($(CXX), g++)
 	CC=gcc
-endif		
+endif
+
+# Detect architecture
+UNAME_M := $(shell uname -m)
+
+# ARM64/Kunpeng support
+ifeq ($(UNAME_M),aarch64)
+ARCH_FLAGS = -DKUNPENG_ARM64=1
+# sse2neon flags - define SSE feature macros for translation
+SSE2NEON_FLAGS = -D__SSE__=1 -D__SSE2__=1 -D__SSE3__=1 -D__SSSE3__=1 -D__SSE4_1__=1 -D__SSE4_2__=1
+SSE2NEON_INCLUDES = -Iext/sse2neon
+CPPFLAGS += $(SSE2NEON_FLAGS)
+INCLUDES += $(SSE2NEON_INCLUDES)
+# Kunpeng 920 uses 128-byte cache lines
+CPPFLAGS += -DCACHE_LINE_BYTES=128
+# Kunpeng 920 specific tuning
+ARCH_FLAGS += -march=armv8.2-a -mtune=tsv110
+else
 ARCH_FLAGS=	-msse -msse2 -msse3 -mssse3 -msse4.1
+endif
+
 MEM_FLAGS=	-DSAIS=1
 CPPFLAGS+=	-DENABLE_PREFETCH -DV17=1 -DMATE_SORT=0 $(MEM_FLAGS) 
-INCLUDES=   -Isrc -Iext/safestringlib/include
+INCLUDES+=   -Isrc -Iext/safestringlib/include
 LIBS=		-lpthread -lm -lz -L. -lbwa -Lext/safestringlib -lsafestring $(STATIC_GCC)
 OBJS=		src/fastmap.o src/bwtindex.o src/utils.o src/memcpy_bwamem.o src/kthread.o \
 			src/kstring.o src/ksw.o src/bntseq.o src/bwamem.o src/profiling.o src/bandedSWA.o \
@@ -51,6 +70,8 @@ OBJS=		src/fastmap.o src/bwtindex.o src/utils.o src/memcpy_bwamem.o src/kthread.
 BWA_LIB=    libbwa.a
 SAFE_STR_LIB=    ext/safestringlib/libsafestring.a
 
+# Architecture-specific builds (x86 only, ARM uses default from above)
+ifneq ($(UNAME_M),aarch64)
 ifeq ($(arch),sse41)
 	ifeq ($(CXX), icpc)
 		ARCH_FLAGS=-msse4.1
@@ -89,10 +110,20 @@ else ifneq ($(arch),)
 else
 myall:multi
 endif
+endif # !aarch64
+
+# ARM64/Kunpeng single-binary build
+ifeq ($(UNAME_M),aarch64)
+ifeq ($(arch),arm64)
+ARCH_FLAGS = -DKUNPENG_ARM64=1 -march=armv8.2-a -mtune=tsv110
+else ifeq ($(arch),)
+myall:arm64
+endif
+endif
 
 CXXFLAGS+=	-g -O3 -fpermissive $(ARCH_FLAGS) #-Wall ##-xSSE2
 
-.PHONY:all clean depend multi
+.PHONY:all clean depend multi arm64
 .SUFFIXES:.cpp .o
 
 .cpp.o:
@@ -100,7 +131,19 @@ CXXFLAGS+=	-g -O3 -fpermissive $(ARCH_FLAGS) #-Wall ##-xSSE2
 
 all:$(EXE)
 
+# ARM64 build target: single binary (NEON = SSE4.1 equivalent)
+arm64:
+	rm -f src/*.o $(BWA_LIB); cd ext/safestringlib/ && $(MAKE) clean;
+	$(MAKE) arch=arm64 EXE=bwa-mem2.sse41 CXX=$(CXX) all
+	$(CXX) -Wall -O3 $(SSE2NEON_FLAGS) src/runsimd.cpp -Iext/safestringlib/include -Iext/sse2neon -Lext/safestringlib/ -lsafestring $(STATIC_GCC) -o bwa-mem2
+
 multi:
+ifeq ($(UNAME_M),aarch64)
+	# On ARM64, only build the sse41-equivalent binary
+	rm -f src/*.o $(BWA_LIB); cd ext/safestringlib/ && $(MAKE) clean;
+	$(MAKE) arch=arm64 EXE=bwa-mem2.sse41 CXX=$(CXX) all
+	$(CXX) -Wall -O3 $(SSE2NEON_FLAGS) src/runsimd.cpp -Iext/safestringlib/include -Iext/sse2neon -Lext/safestringlib/ -lsafestring $(STATIC_GCC) -o bwa-mem2
+else
 	rm -f src/*.o $(BWA_LIB); cd ext/safestringlib/ && $(MAKE) clean;
 	$(MAKE) arch=sse41    EXE=bwa-mem2.sse41    CXX=$(CXX) all
 	rm -f src/*.o $(BWA_LIB); cd ext/safestringlib/ && $(MAKE) clean;
@@ -112,6 +155,7 @@ multi:
 	rm -f src/*.o $(BWA_LIB); cd ext/safestringlib/ && $(MAKE) clean;
 	$(MAKE) arch=avx512 EXE=bwa-mem2.avx512bw CXX=$(CXX) all
 	$(CXX) -Wall -O3 src/runsimd.cpp -Iext/safestringlib/include -Lext/safestringlib/ -lsafestring $(STATIC_GCC) -o bwa-mem2
+endif
 
 
 $(EXE):$(BWA_LIB) $(SAFE_STR_LIB) src/main.o
@@ -154,8 +198,8 @@ src/bwamem_pair.o: src/kswv.h
 src/bwtindex.o: src/bntseq.h src/bwa.h src/bwt.h src/macro.h src/utils.h
 src/bwtindex.o: src/FMI_search.h src/read_index_ele.h
 src/fastmap.o: src/fastmap.h src/bwa.h src/bntseq.h src/bwt.h src/macro.h
-src/fastmap.o: src/bwamem.h src/kthread.h src/bandedSWA.h src/kstring.h
-src/fastmap.o: src/ksw.h src/kvec.h src/ksort.h src/utils.h src/profiling.h
+src/fastmap.o: src/bwamem.h src/kthread.h src/bandedSWA.h src/kstring.h src/ksw.h
+src/fastmap.o: src/kvec.h src/ksort.h src/utils.h src/profiling.h
 src/fastmap.o: src/FMI_search.h src/read_index_ele.h src/kseq.h
 src/kstring.o: src/kstring.h
 src/ksw.o: src/ksw.h src/macro.h
