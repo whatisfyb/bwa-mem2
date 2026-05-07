@@ -32,10 +32,17 @@ Authors: Vasimuddin Md <vasimuddin.md@intel.com>; Sanchit Misra <sanchit.misra@i
 #include <ittnotify.h> 
 #endif
 
-#if defined(__clang__) || defined(__GNUC__)
+#if !defined(__AVX512BW__) && !defined(__AVX2__)
+// SSE4.1/NEON path: define mask types for compatibility with AVX512 code patterns
+#ifndef __mmask8
 #define __mmask8 uint8_t
+#endif
+#ifndef __mmask16
 #define __mmask16 uint16_t
+#endif
+#ifndef __mmask32
 #define __mmask32 uint32_t
+#endif
 #endif
 
 // ------------------------------------------------------------------------------------
