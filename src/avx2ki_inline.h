@@ -10,8 +10,10 @@
    - This header uses extern "C" { static inline ... } for C linkage compatibility
      with avx.h's later re-declarations, while static provides internal linkage
      (no multiple definition errors at link time)
-   - For complex intrinsics (srli/slli/movemask/blendv/extract), avx.h provides
-     extern "C" declarations that resolve to libavx2neon.so at link time
+   - For complex intrinsics that can't be 1:1 mapped (srli/slli/extract),
+     avx.h provides extern "C" declarations that resolve to libavx2neon.so
+   - For hot intrinsics that cause code bloat when inlined (blendv/movemask),
+     we use static __attribute__((noinline)) — tiny local wrapper, no caller bloat
 
    Type compatibility: AVX2KI's __m128i is a union containing NEON vector members
    (e.g., int8x16_t vect_s8, int16x8_t vect_s16), so direct NEON operations on
@@ -255,14 +257,33 @@ static inline __attribute__((always_inline)) __m128i _mm_andnot_si128(__m128i a,
 }
 #endif
 
+/* ========== Conditional Blend & Horizontal Mask ========== */
+/* _mm_blendv_epi8 and _mm_movemask_epi8 are handled by avx2ki_noinline.c.
+ * That file provides extern "C" function definitions that override the
+ * library versions from libavx2neon.so — same C linkage, but our tiny
+ * ~3-instruction NEON implementations instead of the library's ~200-instruction
+ * byte-by-byte extraction.
+ *
+ * Why not inline/noinline/macro in this header?
+ * - always_inline: causes massive caller code bloat (smithWaterman128_16: 2780→7356B)
+ * - noinline function: GCC 10.3.1 ICE on static noinline with __m128i + extern "C"
+ * - noinline outside extern "C": conflicts with avx.h's later extern "C" declarations
+ * - macro: same bloat as always_inline (inline expansion at every call site)
+ * - separate .c file: compiled independently, no caller bloat, no linkage conflicts
+ *
+ * The Makefile compiles avx2ki_noinline.c and links it before libavx2neon.so,
+ * so our definitions take precedence over the library's.
+
 /* ========== Shift (immediate) — must use AVX2KI library ========== */
 /* _mm_srli_si128 / _mm_slli_si128 use vextq_s8 which needs compile-time const */
 /* These are declared as extern "C" in avx.h and resolved from libavx2neon.so */
 
-/* ========== Complex — must use AVX2KI library ========== */
-/* _mm_movemask_epi8: complex horizontal reduction */
-/* _mm_blendv_epi8: conditional blend */
+/* ========== Remaining — must use AVX2KI library ========== */
 /* _mm_extract_epi16: vgetq_lane_s16 needs compile-time const */
+
+/* ========== Already handled above as noinline wrappers ========== */
+/* _mm_blendv_epi8: noinline — prevents caller bloat while eliminating 200-instruction library call */
+/* _mm_movemask_epi8: noinline — prevents caller bloat while eliminating library call */
 
 #endif /* __ARM_NEON || __aarch64__ */
 
