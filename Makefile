@@ -71,6 +71,9 @@ OBJS=		src/fastmap.o src/bwtindex.o src/utils.o src/memcpy_bwamem.o src/kthread.
 			src/kstring.o src/ksw.o src/bntseq.o src/bwamem.o src/profiling.o src/bandedSWA.o \
 			src/FMI_search.o src/read_index_ele.o src/bwamem_pair.o src/kswv.o src/bwa.o \
 			src/bwamem_extra.o src/kopen.o
+ifeq ($(UNAME_M),aarch64)
+OBJS += src/avx2ki_noinline.o
+endif
 BWA_LIB=    libbwa.a
 SAFE_STR_LIB=    ext/safestringlib/libsafestring.a
 
@@ -128,10 +131,13 @@ endif
 CXXFLAGS+=	-g -O3 -fpermissive $(ARCH_FLAGS) #-Wall ##-xSSE2
 
 .PHONY:all clean depend multi arm64
-.SUFFIXES:.cpp .o
+.SUFFIXES:.cpp .o .c
 
 .cpp.o:
 	$(CXX) -c $(CXXFLAGS) $(CPPFLAGS) $(INCLUDES) $< -o $@
+
+.c.o:
+	$(CC) -c -O3 $(ARCH_FLAGS) $(CPPFLAGS) $(INCLUDES) $< -o $@
 
 all:$(EXE)
 
