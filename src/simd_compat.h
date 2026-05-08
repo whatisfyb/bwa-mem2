@@ -33,8 +33,24 @@
 
 #if defined(__ARM_NEON) || defined(__aarch64__)
 
-/* Include AVX2KI for AVX2-to-NEON translation (Kunpeng System Library) */
-#include "avx2ki.h"
+/*
+ * AVX2KI Inline Shim Optimization
+ *
+ * Strategy: include ONLY avx2ki_type.h (type definitions) + our inline shim
+ * for hot intrinsics, then include avx.h for the remaining intrinsics that
+ * must use the library (srli/slli/movemask/blendv/extract).
+ *
+ * avx2ki_type.h: defines __m128i union with NEON vector members
+ * avx2ki_inline.h: static inline NEON wrappers for ~25 hot intrinsics
+ * avx.h: extern "C" declarations for remaining intrinsics (linked from libavx2neon.so)
+ *
+ * Since avx2ki_inline.h uses static inline (internal linkage), there is no
+ * conflict with avx.h's extern "C" declarations — the compiler resolves
+ * the static inline first for inlining, and the extern symbol is unused.
+ */
+#include "avx2ki_type.h"
+#include "avx2ki_inline.h"
+#include "avx.h"
 
 /*
  * ARM NEON does not have _mm_malloc/_mm_free.
