@@ -1,0 +1,139 @@
+/*************************************************************************************
+                           The MIT License
+
+   BWA-MEM2  (Sequence alignment using Burrows-Wheeler Transform),
+   Copyright (C) 2019  Intel Corporation, Heng Li.
+
+   Permission is hereby granted, free of charge, to any person obtaining
+   a copy of this software and associated documentation files (the
+   "Software"), to deal in the Software without restriction, including
+   without limitation the rights to use, copy, modify, merge, publish,
+   distribute, sublicense, and/or sell copies of the Software, and to
+   permit persons to whom the Software is furnished to do so, subject to
+   the following conditions:
+
+   The above copyright notice and this permission notice shall be
+   included in all copies or substantial portions of the Software.
+
+   THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+   EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+   MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
+   NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS
+   BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN
+   ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
+   CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+   SOFTWARE.
+
+   ARM compatibility layer for bwa-mem2 on ARM64/Kunpeng 920
+   Uses AVX2KI (Kunpeng System Library) for AVX2-to-NEON translation
+*****************************************************************************************/
+
+#ifndef SIMD_COMPAT_H
+#define SIMD_COMPAT_H
+
+#if defined(__ARM_NEON) || defined(__aarch64__)
+
+/* Include AVX2KI for AVX2-to-NEON translation (Kunpeng System Library) */
+#include "avx2ki.h"
+
+/*
+ * ARM NEON does not have _mm_malloc/_mm_free.
+ * Use posix_memalign / free as portable alternatives.
+ *
+ * Note: _mm_malloc(size, align) takes (size, alignment)
+ *       posix_memalign(&ptr, alignment, size) takes (&ptr, alignment, size)
+ *       The parameter ORDER is different!
+ */
+
+#include <cstdlib>
+#include <cerrno>
+
+static inline void* aligned_alloc_compat(size_t alignment, size_t size)
+{
+    void* ptr = nullptr;
+    /* posix_memalign requires alignment to be a power of 2 and a multiple of sizeof(void*) */
+    if (alignment < sizeof(void*))
+        alignment = sizeof(void*);
+    int ret = posix_memalign(&ptr, alignment, size);
+    if (ret != 0) {
+        errno = ret;
+        return nullptr;
+    }
+    return ptr;
+}
+
+/* Provide _mm_malloc / _mm_free compatible wrappers for ARM */
+#define _mm_malloc(size, align) aligned_alloc_compat((align), (size))
+#define _mm_free(ptr) free((ptr))
+
+/*
+ * Cache line size for Kunpeng 920: 128 bytes
+ * Override if not already defined
+ */
+#ifndef CACHE_LINE_BYTES
+#define CACHE_LINE_BYTES 128
+#endif
+
+/*
+ * SIMD width definitions for ARM NEON (128-bit, equivalent to SSE4.1)
+ * These should match the SSE2 path: 16 lanes of int8, 8 lanes of int16
+ * The AVX2KI_FLAGS in Makefile define __SSE2__=1, so the existing
+ * SIMD_WIDTH8=16 / SIMD_WIDTH16=8 path in bandedSWA.h will be taken.
+ */
+
+/*
+ * _mm_countbits_64 equivalent for ARM
+ * __builtin_popcountl works on both x86 and ARM with GCC/Clang
+ * FMI_search.h already has a GCC/Clang-specific definition that works,
+ * so we don't need to redefine it here.
+ */
+
+/*
+ * Prefetch hint constants for ARM.
+ * These are normally defined in xmmintrin.h on x86.
+ * AVX2KI may not define all of them, so we define them here.
+ */
+#ifndef _MM_HINT_T0
+#define _MM_HINT_T0 3
+#endif
+#ifndef _MM_HINT_T1
+#define _MM_HINT_T1 2
+#endif
+#ifndef _MM_HINT_T2
+#define _MM_HINT_T2 1
+#endif
+#ifndef _MM_HINT_NTA
+#define _MM_HINT_NTA 0
+#endif
+
+/*
+ * Override AVX2KI's _mm_prefetch with a const void* version.
+ * avx2ki.h may define _mm_prefetch(char const*, int) but x86 intrinsics
+ * accept const void*, and bwa-mem2 passes non-char pointers directly.
+ */
+#ifdef _mm_prefetch
+#undef _mm_prefetch
+#endif
+#define _mm_prefetch(p, i) __builtin_prefetch((p), 0, (i) == _MM_HINT_T0 ? 3 : ((i) == _MM_HINT_T1 ? 2 : ((i) == _MM_HINT_T2 ? 1 : 0)))
+
+/*
+ * __rdtsc() replacement for ARM64
+ * On x86, __rdtsc() reads the Time Stamp Counter (TSC).
+ * On ARM64, we use the generic timer register (CNTVCT_EL0).
+ * This is used for profiling only and does not affect correctness.
+ */
+#if defined(__aarch64__)
+static inline uint64_t __rdtsc(void)
+{
+    uint64_t val;
+    __asm__ volatile ("mrs %0, cntvct_el0" : "=r" (val));
+    return val;
+}
+#endif
+
+#else
+/* x86 path: include full intrinsics header for __rdtsc and all SIMD ops */
+#include <immintrin.h>
+#endif /* __ARM_NEON || __aarch64__ */
+
+#endif /* SIMD_COMPAT_H */

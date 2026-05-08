@@ -53,6 +53,37 @@ extern "C" {
 #define SIMD_AVX512F 0x100
 #define SIMD_AVX512BW 0x200
 
+#if defined(__aarch64__) || defined(__ARM_NEON)
+
+/*
+ * ARM64/NEON SIMD detection
+ * On ARM, NEON 128-bit is equivalent to SSE4.1 level
+ * We use getauxval(AT_HWCAP) to detect NEON availability at runtime
+ */
+#include <sys/auxv.h>
+#if defined(__linux__)
+#include <asm/hwcap.h>
+#endif
+
+static int arm_simd(void)
+{
+    int flag = 0;
+    unsigned long hwcap = getauxval(AT_HWCAP);
+    if (hwcap & HWCAP_ASIMD) {
+        /* NEON (Advanced SIMD) is available - report as SSE4.1 equivalent */
+        flag |= SIMD_SSE | SIMD_SSE2 | SIMD_SSE3 | SIMD_SSSE3 | SIMD_SSE4_1;
+    }
+#if defined(HWCAP_SVE)
+    /* SVE is not used by bwa-mem2, but detect it for completeness */
+    if (hwcap & HWCAP_SVE) {
+        /* SVE available but not used - still only SSE4.1 level for bwa-mem2 */
+    }
+#endif
+    return flag;
+}
+
+#else /* x86 */
+
 #ifndef _MSC_VER
 // adapted from https://github.com/01org/linux-sgx/blob/master/common/inc/internal/linux/cpuid_gnu.h
 void __cpuidex(int cpuid[4], int func_id, int subfunc_id)
@@ -91,6 +122,8 @@ static int x86_simd(void)
 	}
 	return flag;
 }
+
+#endif /* __aarch64__ || __ARM_NEON */
 
 static int exe_path(const char *exe, int max, char buf[], int *base_st)
 {
@@ -190,13 +223,20 @@ int main(int argc, char *argv[])
         }
 	strcpy_s(prefix, PATH_MAX, buf);
 	strcat_s(prefix, PATH_MAX, &argv0[base_st]);
-	//prefix_len = strlen(prefix);
+	//prefix_len = strlen(prefix));
+
+#if defined(__aarch64__) || defined(__ARM_NEON)
+	/* On ARM64, we only have the sse41-equivalent binary (NEON 128-bit) */
+	simd = arm_simd();
+	if (simd & SIMD_SSE4_1) test_and_launch(argv, prefix, ".sse41");
+#else
 	simd = x86_simd();
 	if (simd & SIMD_AVX512BW) test_and_launch(argv, prefix, ".avx512bw");
 	if (simd & SIMD_AVX2) test_and_launch(argv, prefix, ".avx2");
 	if (simd & SIMD_AVX) test_and_launch(argv, prefix, ".avx");
 	if (simd & SIMD_SSE4_2) test_and_launch(argv, prefix, ".sse42");
 	if (simd & SIMD_SSE4_1) test_and_launch(argv, prefix, ".sse41");
+#endif
 	free(prefix);
 	fprintf(stderr, "ERROR: fail to find the right executable\n");
 	return 2;

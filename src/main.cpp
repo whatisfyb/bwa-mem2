@@ -75,16 +75,18 @@ int main(int argc, char* argv[])
         extern char *bwa_pg;
 
         fprintf(stderr, "-----------------------------\n");
-#if __AVX512BW__
+#if defined(__ARM_NEON) || defined(__aarch64__)
+        fprintf(stderr, "Executing in ARM NEON mode (AVX2KI/SSE4.1 equivalent)!!\n");
+#elif __AVX512BW__
         fprintf(stderr, "Executing in AVX512 mode!!\n");
 #elif __AVX2__
         fprintf(stderr, "Executing in AVX2 mode!!\n");
 #elif __AVX__
-        fprintf(stderr, "Executing in AVX mode!!\n");        
+        fprintf(stderr, "Executing in AVX mode!!\n");
 #elif __SSE4_2__
         fprintf(stderr, "Executing in SSE4.2 mode!!\n");
 #elif __SSE4_1__
-        fprintf(stderr, "Executing in SSE4.1 mode!!\n");        
+        fprintf(stderr, "Executing in SSE4.1 mode!!\n");
 #endif
         fprintf(stderr, "-----------------------------\n");
 

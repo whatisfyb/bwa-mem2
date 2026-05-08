@@ -34,7 +34,7 @@ Authors: Sanchit Misra <sanchit.misra@intel.com>; Vasimuddin Md <vasimuddin.md@i
 #include <stdlib.h>
 #include <stdint.h>
 #include <string.h>
-#include <immintrin.h>
+#include "simd_compat.h"
 #include <limits.h>
 #include <fstream>
 
@@ -58,9 +58,12 @@ typedef struct checkpoint_occ_scalar
 }CP_OCC;
 
 #if defined(__clang__) || defined(__GNUC__)
+#if !defined(__ARM_NEON) && !defined(__aarch64__)
+/* AVX2KI already provides _mm_countbits_64 on ARM */
 static inline int _mm_countbits_64(unsigned long x) {
     return __builtin_popcountl(x);
 }
+#endif
 #endif
 
 #define \

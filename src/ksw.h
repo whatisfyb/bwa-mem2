@@ -26,7 +26,11 @@
 #define __AC_KSW_H
 
 #include <stdint.h>
+#if defined(__ARM_NEON) || defined(__aarch64__)
+#include "simd_compat.h"
+#else
 #include <emmintrin.h>
+#endif
 
 #define KSW_XBYTE  0x10000
 #define KSW_XSTOP  0x20000
