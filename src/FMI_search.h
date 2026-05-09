@@ -57,14 +57,11 @@ typedef struct checkpoint_occ_scalar
     uint64_t one_hot_bwt_str[4];
 }CP_OCC;
 
-#if defined(__clang__) || defined(__GNUC__)
-#if !defined(__ARM_NEON) && !defined(__aarch64__)
-/* AVX2KI already provides _mm_countbits_64 on ARM */
-static inline int _mm_countbits_64(unsigned long x) {
-    return __builtin_popcountl(x);
-}
-#endif
-#endif
+/* Use __builtin_popcountl directly instead of _mm_countbits_64.
+ * AVX2KI's _mm_countbits_64 is a PLT call to libavx2neon.so (~20 instructions),
+ * while __builtin_popcountl compiles to a single 'cnt' instruction on ARM.
+ * On x86, __builtin_popcountl uses the popcnt instruction when available. */
+#define popcount64(x) __builtin_popcountl(x)
 
 #define \
 GET_OCC(pp, c, occ_id_pp, y_pp, occ_pp, one_hot_bwt_str_c_pp, match_mask_pp) \
@@ -73,7 +70,7 @@ GET_OCC(pp, c, occ_id_pp, y_pp, occ_pp, one_hot_bwt_str_c_pp, match_mask_pp) \
                 int64_t occ_pp = cp_occ[occ_id_pp].cp_count[c]; \
                 uint64_t one_hot_bwt_str_c_pp = cp_occ[occ_id_pp].one_hot_bwt_str[c]; \
                 uint64_t match_mask_pp = one_hot_bwt_str_c_pp & one_hot_mask_array[y_pp]; \
-                occ_pp += _mm_countbits_64(match_mask_pp);
+                occ_pp += popcount64(match_mask_pp);
 
 typedef struct smem_struct
 {
