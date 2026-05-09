@@ -66,9 +66,12 @@
 
 /*
  * Forward declaration of NEON-native wrapper functions — defined in avx2ki_noinline.c.
- * These take native NEON uint8x16_t arguments (passed in vector registers v0-v7
- * under AAPCS64) instead of __m128i union (passed in general registers).
- * This eliminates 8 fmov instructions per blendv call and 2 fmov per movemask call.
+ * _blendv_epi8_neon takes native NEON uint8x16_t arguments (passed in vector
+ * registers v0-v7 under AAPCS64) instead of __m128i union (passed in general
+ * registers). This eliminates 8 fmov instructions per blendv call.
+ *
+ * _movemask_epi8_neon is kept for linkage compatibility but is NOT called at
+ * runtime — _mm_movemask_epi8 is now an inline macro (see below).
  */
 extern "C" uint8x16_t _blendv_epi8_neon(uint8x16_t a, uint8x16_t b, uint8x16_t mask);
 extern "C" int _movemask_epi8_neon(uint8x16_t a);
@@ -85,7 +88,7 @@ extern "C" int _movemask_epi8_neon(uint8x16_t a);
  * By extracting the .vect_u8 member BEFORE the call and passing it to a
  * function that takes uint8x16_t (passed in vector registers v0-v7), we
  * eliminate ALL fmov overhead while keeping the function call boundary
- * that the compiler needs for good instruction scheduling.
+ * that the compiler needs for good instruction scheduling in BSW.
  *
  * The GCC statement expression ({...}) is used to create a temporary
  * __m128i result and assign the NEON return value to its .vect_u8 member.
@@ -97,11 +100,36 @@ extern "C" int _movemask_epi8_neon(uint8x16_t a);
 })
 
 /*
- * _mm_movemask_epi8 macro override: redirect to _movemask_epi8_neon() which
- * takes native NEON vector argument instead of __m128i union.
- * Same rationale as blendv — eliminates 2 fmov instructions per call.
+ * _mm_movemask_epi8 macro override: INLINE expansion using NEON intrinsics.
+ *
+ * Previous approach (_movemask_epi8_neon function call) eliminated fmov overhead
+ * but introduced a worse problem: the function call boundary forces the compiler
+ * to spill/restore vector registers around the call site. In ksw_u8's lazy-F loop,
+ * this caused 6 extra stack spill/restore instructions per iteration, making the
+ * loop significantly slower than sse2neon (which inlines movemask).
+ *
+ * This inline macro expands to the same NEON instruction sequence that
+ * _movemask_epi8_neon uses, but without the function call boundary. The compiler
+ * can keep all vector values in registers across the movemask operation, avoiding
+ * stack spills. With only ~1-2 movemask calls per inner loop iteration, the code
+ * bloat risk is low (unlike blendv's ~33 calls/row which caused +54% regression).
+ *
+ * Algorithm: extract sign bits of each of the 16 bytes into a 16-bit integer.
+ * 1. Shift each byte right by 7 → each byte is 0 or 1
+ * 2. Shift each byte left by its bit position (0-7 per half) using vshlq_u8
+ * 3. Horizontal add each 8-byte half → bits [7:0] and [15:8]
+ * 4. Combine halves into final 16-bit result
  */
-#define _mm_movemask_epi8(a) _movemask_epi8_neon((a).vect_u8)
+#define _mm_movemask_epi8(a) __extension__({ \
+    uint8x16_t _a = (a).vect_u8; \
+    const int8_t _shift[16] = {0,1,2,3,4,5,6,7,0,1,2,3,4,5,6,7}; \
+    uint8x16_t _msbs = vshrq_n_u8(_a, 7); \
+    int8x16_t _shifts = vld1q_s8(_shift); \
+    uint8x16_t _pos = vshlq_u8(_msbs, _shifts); \
+    int _r = (int)vaddv_u8(vget_low_u8(_pos)) | \
+             ((int)vaddv_u8(vget_high_u8(_pos)) << 8); \
+    _r; \
+})
 
 /*
  * ARM NEON does not have _mm_malloc/_mm_free.
