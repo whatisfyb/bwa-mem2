@@ -108,6 +108,9 @@ typedef struct {
 
 const kswr_t g_defr = { 0, -1, -1, -1, -1, -1, -1 };
 
+#if defined(__ARM_NEON) || defined(__aarch64__)
+#define __max_16(ret, xx) (ret) = vmaxvq_u8((xx).vect_u8)
+#else
 #define __max_16(ret, xx) do { \
 		(xx) = _mm_max_epu8((xx), _mm_srli_si128((xx), 8)); \
 		(xx) = _mm_max_epu8((xx), _mm_srli_si128((xx), 4)); \
@@ -115,6 +118,7 @@ const kswr_t g_defr = { 0, -1, -1, -1, -1, -1, -1 };
 		(xx) = _mm_max_epu8((xx), _mm_srli_si128((xx), 1)); \
     	(ret) = _mm_extract_epi16((xx), 0) & 0x00ff; \
 	} while (0)
+#endif
 
 #define DP  6
 #define DP1 7

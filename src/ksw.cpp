@@ -121,6 +121,12 @@ kswr_t ksw_u8(kswq_t *q, int tlen, const uint8_t *target,
 	__m128i zero, oe_del, e_del, oe_ins, e_ins, shift, *H0, *H1, *E, *Hmax;
 	kswr_t r;
 
+#if defined(__ARM_NEON) || defined(__aarch64__)
+/* 语义NEON翻译：vmaxvq_u8是单条ARMv8.2-A指令，替代SSE2的4步shift-reduce
+ * 原始SSE2: 4×(max+srli) + extract = ~9条NEON指令（经AVX2KI inline shim展开）
+ * 语义翻译: vmaxvq_u8 = 1条NEON指令，TaiShan v110上3-4周期延迟 */
+#define __max_16(ret, xx) (ret) = vmaxvq_u8((xx).vect_u8)
+#else
 #define __max_16(ret, xx) do { \
 		(xx) = _mm_max_epu8((xx), _mm_srli_si128((xx), 8)); \
 		(xx) = _mm_max_epu8((xx), _mm_srli_si128((xx), 4)); \
@@ -128,6 +134,7 @@ kswr_t ksw_u8(kswq_t *q, int tlen, const uint8_t *target,
 		(xx) = _mm_max_epu8((xx), _mm_srli_si128((xx), 1)); \
     	(ret) = _mm_extract_epi16((xx), 0) & 0x00ff; \
 	} while (0)
+#endif
 
 	// initialization
 	r = g_defr;
@@ -242,12 +249,19 @@ kswr_t ksw_i16(kswq_t *q, int tlen, const uint8_t *target, int _o_del, int _e_de
 	__m128i zero, oe_del, e_del, oe_ins, e_ins, *H0, *H1, *E, *Hmax;
 	kswr_t r;
 
+#if defined(__ARM_NEON) || defined(__aarch64__)
+/* 语义NEON翻译：vmaxvq_s16是单条ARMv8.2-A指令，替代SSE2的3步shift-reduce
+ * 原始SSE2: 3×(max+srli) + extract = ~7条NEON指令
+ * 语义翻译: vmaxvq_s16 = 1条NEON指令 */
+#define __max_8(ret, xx) (ret) = vmaxvq_s16((xx).vect_s16)
+#else
 #define __max_8(ret, xx) do { \
 		(xx) = _mm_max_epi16((xx), _mm_srli_si128((xx), 8)); \
 		(xx) = _mm_max_epi16((xx), _mm_srli_si128((xx), 4)); \
 		(xx) = _mm_max_epi16((xx), _mm_srli_si128((xx), 2)); \
     	(ret) = _mm_extract_epi16((xx), 0); \
 	} while (0)
+#endif
 
 	// initialization
 	r = g_defr;

@@ -1312,6 +1312,9 @@ kswr_t kswv::kswvScalar_u8(kswq_t *q, int tlen, const uint8_t *target,
     __m128i zero, oe_del, e_del, oe_ins, e_ins, shift, *H0, *H1, *E, *Hmax;
     kswr_t r;
 
+#if defined(__ARM_NEON) || defined(__aarch64__)
+#define __max_16(ret, xx) (ret) = vmaxvq_u8((xx).vect_u8)
+#else
 #define __max_16(ret, xx) do { \
         (xx) = _mm_max_epu8((xx), _mm_srli_si128((xx), 8)); \
         (xx) = _mm_max_epu8((xx), _mm_srli_si128((xx), 4)); \
@@ -1319,6 +1322,7 @@ kswr_t kswv::kswvScalar_u8(kswq_t *q, int tlen, const uint8_t *target,
         (xx) = _mm_max_epu8((xx), _mm_srli_si128((xx), 1)); \
         (ret) = _mm_extract_epi16((xx), 0) & 0x00ff;        \
     } while (0)
+#endif
     
     // initialization
     r = g_defr;
@@ -1441,12 +1445,16 @@ kswr_t kswv::kswvScalar_i16(kswq_t *q, int tlen, const uint8_t *target,
     kswr_t r;
 #define SIMD16 8
 
+#if defined(__ARM_NEON) || defined(__aarch64__)
+#define __max_8(ret, xx) (ret) = vmaxvq_s16((xx).vect_s16)
+#else
 #define __max_8(ret, xx) do { \
         (xx) = _mm_max_epi16((xx), _mm_srli_si128((xx), 8)); \
         (xx) = _mm_max_epi16((xx), _mm_srli_si128((xx), 4)); \
         (xx) = _mm_max_epi16((xx), _mm_srli_si128((xx), 2)); \
         (ret) = _mm_extract_epi16((xx), 0); \
     } while (0)
+#endif
 
     // initialization
     r = g_defr;
