@@ -507,75 +507,155 @@ void FMI_search::getSMEMsOnePosOneThread(uint8_t *enc_qdb,
                                          int64_t *__numTotalSmem)
 {
     int64_t numTotalSmem = *__numTotalSmem;
-    SMEM prevArray[max_readlength];
+
+    // 预分配BATCH_FWD_SIZE个read的prevArray内存，避免每read单独malloc/free
+    SMEM *batchPrevMem = (SMEM *)_mm_malloc(BATCH_FWD_SIZE * max_readlength * sizeof(SMEM), 64);
 
     uint32_t i;
-    // Perform SMEM for original reads
-    for(i = 0; i < numReads; i++)
+    // 以BATCH_FWD_SIZE为一组处理reads，实现前向扩展的循环翻转
+    for(i = 0; i < numReads; i += BATCH_FWD_SIZE)
     {
-        int x = query_pos_array[i];
-        int32_t rid = rid_array[i];
-        int next_x = x + 1;
+        uint32_t batchSize = BATCH_FWD_SIZE;
+        if((i + batchSize) > numReads)
+            batchSize = numReads - i;
 
-        int readlength = seq_[rid].l_seq;
-        int offset = query_cum_len_ar[rid];
-        // uint8_t a = enc_qdb[rid * readlength + x];
-        uint8_t a = enc_qdb[offset + x];
+        BatchFwdState bstate[BATCH_FWD_SIZE];
 
-        if(a < 4)
+        // Phase A: 初始化 — 确定每个read的起始状态
+        for(uint32_t b = 0; b < batchSize; b++)
         {
-            SMEM smem;
-            smem.rid = rid;
-            smem.m = x;
-            smem.n = x;
-            smem.k = count[a];
-            smem.l = count[3 - a];
-            smem.s = count[a+1] - count[a];
-            int numPrev = 0;
-            
-            int j;
-            for(j = x + 1; j < readlength; j++)
+            uint32_t ri = i + b;
+            int x = query_pos_array[ri];
+            int32_t rid = rid_array[ri];
+            int readlength = seq_[rid].l_seq;
+            int offset = query_cum_len_ar[rid];
+            uint8_t a = enc_qdb[offset + x];
+
+            bstate[b].rid = rid;
+            bstate[b].x = x;
+            bstate[b].next_x = x + 1;
+            bstate[b].offset = offset;
+            bstate[b].readlength = readlength;
+            bstate[b].numPrev = 0;
+            bstate[b].min_intv = min_intv_array[ri];
+            bstate[b].matchIdx = ri;
+            bstate[b].prevArray = batchPrevMem + b * max_readlength;
+
+            if(a < 4)
             {
-                // a = enc_qdb[rid * readlength + j];
-                a = enc_qdb[offset + j];
-                next_x = j + 1;
-                if(a < 4)
-                {
-                    SMEM smem_ = smem;
-
-                    // Forward extension is backward extension with the BWT of reverse complement
-                    smem_.k = smem.l;
-                    smem_.l = smem.k;
-                    SMEM newSmem_ = backwardExt(smem_, 3 - a);
-                    //SMEM newSmem_ = forwardExt(smem_, 3 - a);
-                    SMEM newSmem = newSmem_;
-                    newSmem.k = newSmem_.l;
-                    newSmem.l = newSmem_.k;
-                    newSmem.n = j;
-
-                    int32_t s_neq_mask = newSmem.s != smem.s;
-
-                    prevArray[numPrev] = smem;
-                    numPrev += s_neq_mask;
-                    if(newSmem.s < min_intv_array[i])
-                    {
-                        next_x = j;
-                        break;
-                    }
-                    smem = newSmem;
-#ifdef ENABLE_PREFETCH
-                    _mm_prefetch((const char *)(&cp_occ[(smem.k) >> CP_SHIFT]), _MM_HINT_T0);
-                    _mm_prefetch((const char *)(&cp_occ[(smem.l) >> CP_SHIFT]), _MM_HINT_T0);
-#endif
-                }
-                else
-                {
-                    break;
-                }
+                bstate[b].eligible = 1;
+                bstate[b].done = 0;
+                bstate[b].smem.rid = rid;
+                bstate[b].smem.m = x;
+                bstate[b].smem.n = x;
+                bstate[b].smem.k = count[a];
+                bstate[b].smem.l = count[3 - a];
+                bstate[b].smem.s = count[a+1] - count[a];
+                bstate[b].j = x + 1;
             }
-            if(smem.s >= min_intv_array[i])
+            else
             {
+                bstate[b].eligible = 0;
+                bstate[b].done = 1;
+            }
+        }
+        // 未使用的slot初始化为done
+        for(uint32_t b = batchSize; b < BATCH_FWD_SIZE; b++)
+        {
+            bstate[b].eligible = 0;
+            bstate[b].done = 1;
+        }
 
+        // Phase B: 前向扩展循环翻转 — 所有活跃read在每个前向步骤同步推进
+        // 采用两趟结构：先prefetch pass发出预取，再compute pass执行计算
+        // 这样prefetch距离≈一个backwardExt调用的时间，有效隐藏DRAM延迟
+        int numActive = 0;
+        for(uint32_t b = 0; b < BATCH_FWD_SIZE; b++)
+            if(bstate[b].eligible && !bstate[b].done) numActive++;
+
+        while(numActive > 0)
+        {
+#ifdef ENABLE_PREFETCH
+            // Prefetch pass: 为所有活跃read的下一步计算预取cp_occ
+            for(uint32_t b = 0; b < BATCH_FWD_SIZE; b++)
+            {
+                if(!bstate[b].eligible || bstate[b].done) continue;
+
+                _mm_prefetch((const char *)(&cp_occ[(bstate[b].smem.k) >> CP_SHIFT]), _MM_HINT_T0);
+                _mm_prefetch((const char *)(&cp_occ[(bstate[b].smem.l) >> CP_SHIFT]), _MM_HINT_T0);
+            }
+#endif
+            // Compute pass: 每个活跃read前向扩展一步
+            for(uint32_t b = 0; b < BATCH_FWD_SIZE; b++)
+            {
+                if(!bstate[b].eligible || bstate[b].done) continue;
+
+                if(bstate[b].j >= bstate[b].readlength)
+                {
+                    bstate[b].done = 1;
+                    numActive--;
+                    continue;
+                }
+
+                uint8_t a = enc_qdb[bstate[b].offset + bstate[b].j];
+                bstate[b].next_x = bstate[b].j + 1;
+
+                if(a >= 4)
+                {
+                    bstate[b].done = 1;
+                    numActive--;
+                    continue;
+                }
+
+                SMEM smem_ = bstate[b].smem;
+                // 前向扩展 = 对反向互补BWT做后向扩展
+                smem_.k = bstate[b].smem.l;
+                smem_.l = bstate[b].smem.k;
+                SMEM newSmem_ = backwardExt(smem_, 3 - a);
+                SMEM newSmem = newSmem_;
+                newSmem.k = newSmem_.l;
+                newSmem.l = newSmem_.k;
+                newSmem.n = bstate[b].j;
+
+                int32_t s_neq_mask = newSmem.s != bstate[b].smem.s;
+
+                bstate[b].prevArray[bstate[b].numPrev] = bstate[b].smem;
+                bstate[b].numPrev += s_neq_mask;
+
+                if(newSmem.s < bstate[b].min_intv)
+                {
+                    bstate[b].next_x = bstate[b].j;
+                    bstate[b].done = 1;
+                    numActive--;
+                    continue;
+                }
+
+                bstate[b].smem = newSmem;
+                bstate[b].j++;
+            }
+        }
+
+        // Phase C: 反向扩展 — 逐read处理，逻辑与原始代码完全一致
+        for(uint32_t b = 0; b < batchSize; b++)
+        {
+            if(!bstate[b].eligible)
+            {
+                query_pos_array[bstate[b].matchIdx] = bstate[b].next_x;
+                continue;
+            }
+
+            SMEM smem = bstate[b].smem;
+            int numPrev = bstate[b].numPrev;
+            SMEM *prevArray = bstate[b].prevArray;
+            int32_t rid = bstate[b].rid;
+            int x = bstate[b].x;
+            int offset = bstate[b].offset;
+            int readlength = bstate[b].readlength;
+            int32_t min_intv = bstate[b].min_intv;
+            uint32_t matchIdx = bstate[b].matchIdx;
+
+            if(smem.s >= min_intv)
+            {
                 prevArray[numPrev] = smem;
                 numPrev++;
             }
@@ -591,13 +671,14 @@ void FMI_search::getSMEMsOnePosOneThread(uint8_t *enc_qdb,
                 prev[numPrev - p - 1] = temp;
             }
 
-            // Backward search
+            // 反向搜索
             int cur_j = readlength;
+            int j;
+            uint8_t a;
             for(j = x - 1; j >= 0; j--)
             {
                 int numCurr = 0;
                 int curr_s = -1;
-                // a = enc_qdb[rid * readlength + j];
                 a = enc_qdb[offset + j];
 
                 if(a > 3)
@@ -610,14 +691,14 @@ void FMI_search::getSMEMsOnePosOneThread(uint8_t *enc_qdb,
                     SMEM newSmem = backwardExt(smem, a);
                     newSmem.m = j;
 
-                    if((newSmem.s < min_intv_array[i]) && ((smem.n - smem.m + 1) >= minSeedLen))
+                    if((newSmem.s < min_intv) && ((smem.n - smem.m + 1) >= minSeedLen))
                     {
                         cur_j = j;
 
                         matchArray[numTotalSmem++] = smem;
                         break;
                     }
-                    if((newSmem.s >= min_intv_array[i]) && (newSmem.s != curr_s))
+                    if((newSmem.s >= min_intv) && (newSmem.s != curr_s))
                     {
                         curr_s = newSmem.s;
                         prev[numCurr++] = newSmem;
@@ -637,7 +718,7 @@ void FMI_search::getSMEMsOnePosOneThread(uint8_t *enc_qdb,
                     newSmem.m = j;
 
 
-                    if((newSmem.s >= min_intv_array[i]) && (newSmem.s != curr_s))
+                    if((newSmem.s >= min_intv) && (newSmem.s != curr_s))
                     {
                         curr_s = newSmem.s;
                         prev[numCurr++] = newSmem;
@@ -663,9 +744,12 @@ void FMI_search::getSMEMsOnePosOneThread(uint8_t *enc_qdb,
                 }
                 numPrev = 0;
             }
+
+            query_pos_array[matchIdx] = bstate[b].next_x;
         }
-        query_pos_array[i] = next_x;
     }
+
+    _mm_free(batchPrevMem);
     (*__numTotalSmem) = numTotalSmem;
 }
 
