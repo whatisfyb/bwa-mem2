@@ -53,6 +53,18 @@
 #include "avx.h"
 
 /*
+ * Macro overrides: redirect _mm_srli/slli/extract to specialized inline wrappers.
+ * These MUST come after avx.h (which declares the extern "C" prototypes),
+ * otherwise the macros would corrupt avx.h's declarations.
+ * After avx.h is processed, these #define substitutions redirect all subsequent
+ * calls (in ksw.cpp, kswv.cpp, etc.) to the specialized _mm_*_N() inlines
+ * defined in avx2ki_inline.h, eliminating PLT calls to libavx2neon.so.
+ */
+#define _mm_srli_si128(a, imm) _mm_srli_si128_##imm(a)
+#define _mm_slli_si128(a, imm) _mm_slli_si128_##imm(a)
+#define _mm_extract_epi16(a, imm) _mm_extract_epi16_##imm(a)
+
+/*
  * ARM NEON does not have _mm_malloc/_mm_free.
  * Use posix_memalign / free as portable alternatives.
  *

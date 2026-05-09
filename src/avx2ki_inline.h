@@ -274,16 +274,48 @@ static inline __attribute__((always_inline)) __m128i _mm_andnot_si128(__m128i a,
  * The Makefile compiles avx2ki_noinline.c and links it before libavx2neon.so,
  * so our definitions take precedence over the library's.
 
-/* ========== Shift (immediate) — must use AVX2KI library ========== */
-/* _mm_srli_si128 / _mm_slli_si128 use vextq_s8 which needs compile-time const */
-/* These are declared as extern "C" in avx.h and resolved from libavx2neon.so */
+/* ========== Shift (immediate) — specialized for each constant value ========== */
+/* _mm_srli_si128 / _mm_slli_si128 use vextq_s8 which needs compile-time const.
+ * AVX2KI library provides runtime versions (PLT calls), but bwa-mem2 only uses
+ * a small set of immediate values: srli with 1,2,4,8 and slli with 1,2.
+ * We provide static inline wrappers for each specific value, so the compiler
+ * can embed the constant directly into vextq_s8. */
+
+/* _mm_srli_si128: shift right by imm8 bytes (shift in zeros from left) */
+static inline __attribute__((always_inline)) __m128i _mm_srli_si128_1(__m128i a) {
+    __m128i r; r.vect_s8 = vextq_s8(a.vect_s8, vdupq_n_s8(0), 1); return r;
+}
+static inline __attribute__((always_inline)) __m128i _mm_srli_si128_2(__m128i a) {
+    __m128i r; r.vect_s8 = vextq_s8(a.vect_s8, vdupq_n_s8(0), 2); return r;
+}
+static inline __attribute__((always_inline)) __m128i _mm_srli_si128_4(__m128i a) {
+    __m128i r; r.vect_s8 = vextq_s8(a.vect_s8, vdupq_n_s8(0), 4); return r;
+}
+static inline __attribute__((always_inline)) __m128i _mm_srli_si128_8(__m128i a) {
+    __m128i r; r.vect_s8 = vextq_s8(a.vect_s8, vdupq_n_s8(0), 8); return r;
+}
+
+/* _mm_slli_si128: shift left by imm8 bytes (shift in zeros from right) */
+static inline __attribute__((always_inline)) __m128i _mm_slli_si128_1(__m128i a) {
+    __m128i r; r.vect_s8 = vextq_s8(vdupq_n_s8(0), a.vect_s8, 15); return r;
+}
+static inline __attribute__((always_inline)) __m128i _mm_slli_si128_2(__m128i a) {
+    __m128i r; r.vect_s8 = vextq_s8(vdupq_n_s8(0), a.vect_s8, 14); return r;
+}
+
+/* _mm_extract_epi16: extract 16-bit value at lane imm8 */
+static inline __attribute__((always_inline)) int _mm_extract_epi16_0(__m128i a) {
+    return (int)vgetq_lane_u16(a.vect_u16, 0);
+}
 
 /* ========== Remaining — must use AVX2KI library ========== */
-/* _mm_extract_epi16: vgetq_lane_s16 needs compile-time const */
 
 /* ========== Already handled above as noinline wrappers ========== */
 /* _mm_blendv_epi8: noinline — prevents caller bloat while eliminating 200-instruction library call */
 /* _mm_movemask_epi8: noinline — prevents caller bloat while eliminating library call */
+
+/* NOTE: Macro overrides for _mm_srli/slli/extract are defined in simd_compat.h
+ * AFTER avx.h is included, to avoid breaking avx.h's extern "C" declarations. */
 
 #endif /* __ARM_NEON || __aarch64__ */
 
