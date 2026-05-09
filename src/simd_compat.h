@@ -65,6 +65,45 @@
 #define _mm_extract_epi16(a, imm) _mm_extract_epi16_##imm(a)
 
 /*
+ * Forward declaration of NEON-native wrapper functions — defined in avx2ki_noinline.c.
+ * These take native NEON uint8x16_t arguments (passed in vector registers v0-v7
+ * under AAPCS64) instead of __m128i union (passed in general registers).
+ * This eliminates 8 fmov instructions per blendv call and 2 fmov per movemask call.
+ */
+extern "C" uint8x16_t _blendv_epi8_neon(uint8x16_t a, uint8x16_t b, uint8x16_t mask);
+extern "C" int _movemask_epi8_neon(uint8x16_t a);
+
+/*
+ * _mm_blendv_epi8 macro override: redirect to _blendv_epi8_neon() which
+ * takes native NEON vector arguments instead of __m128i union.
+ *
+ * CRITICAL: Under AAPCS64, __m128i union is passed via GENERAL registers
+ * (x0-x7), requiring 6 fmov (GPR→NEON) + 2 fmov (NEON→GPR) per call =
+ * 8 wasted instructions. With ~13 blendv calls per SW row, that's ~104
+ * wasted fmov instructions.
+ *
+ * By extracting the .vect_u8 member BEFORE the call and passing it to a
+ * function that takes uint8x16_t (passed in vector registers v0-v7), we
+ * eliminate ALL fmov overhead while keeping the function call boundary
+ * that the compiler needs for good instruction scheduling.
+ *
+ * The GCC statement expression ({...}) is used to create a temporary
+ * __m128i result and assign the NEON return value to its .vect_u8 member.
+ */
+#define _mm_blendv_epi8(a, b, mask) __extension__({ \
+    __m128i _r; \
+    _r.vect_u8 = _blendv_epi8_neon((a).vect_u8, (b).vect_u8, (mask).vect_u8); \
+    _r; \
+})
+
+/*
+ * _mm_movemask_epi8 macro override: redirect to _movemask_epi8_neon() which
+ * takes native NEON vector argument instead of __m128i union.
+ * Same rationale as blendv — eliminates 2 fmov instructions per call.
+ */
+#define _mm_movemask_epi8(a) _movemask_epi8_neon((a).vect_u8)
+
+/*
  * ARM NEON does not have _mm_malloc/_mm_free.
  * Use posix_memalign / free as portable alternatives.
  *

@@ -258,21 +258,21 @@ static inline __attribute__((always_inline)) __m128i _mm_andnot_si128(__m128i a,
 #endif
 
 /* ========== Conditional Blend & Horizontal Mask ========== */
-/* _mm_blendv_epi8 and _mm_movemask_epi8 are handled by avx2ki_noinline.c.
- * That file provides extern "C" function definitions that override the
- * library versions from libavx2neon.so — same C linkage, but our tiny
- * ~3-instruction NEON implementations instead of the library's ~200-instruction
- * byte-by-byte extraction.
+/* _mm_blendv_epi8 and _mm_movemask_epi8 are handled by NEON-native wrappers.
  *
- * Why not inline/noinline/macro in this header?
+ * simd_compat.h defines macros that extract .vect_u8 from __m128i and call
+ * _blendv_epi8_neon / _movemask_epi8_neon (defined in avx2ki_noinline.c).
+ * These functions take native uint8x16_t arguments passed in vector registers
+ * (v0-v7 under AAPCS64), eliminating ALL fmov overhead (8 per blendv call,
+ * 2 per movemask call) while preserving the function call boundary that the
+ * compiler needs for good instruction scheduling in the BSW inner loop.
+ *
+ * Why not inline/noinline/macro directly?
  * - always_inline: causes massive caller code bloat (smithWaterman128_16: 2780→7356B)
- * - noinline function: GCC 10.3.1 ICE on static noinline with __m128i + extern "C"
- * - noinline outside extern "C": conflicts with avx.h's later extern "C" declarations
- * - macro: same bloat as always_inline (inline expansion at every call site)
- * - separate .c file: compiled independently, no caller bloat, no linkage conflicts
- *
- * The Makefile compiles avx2ki_noinline.c and links it before libavx2neon.so,
- * so our definitions take precedence over the library's.
+ * - macro (decompose blendv to andnot+and+or): severe regression (+54%)
+ * - noinline with __m128i args: 8 fmov per call due to AAPCS64 calling convention
+ *   (__m128i union passed via general registers, not vector registers)
+ * - NEON-native noinline: zero fmov, preserves call boundary ← chosen approach
 
 /* ========== Shift (immediate) — specialized for each constant value ========== */
 /* _mm_srli_si128 / _mm_slli_si128 use vextq_s8 which needs compile-time const.
