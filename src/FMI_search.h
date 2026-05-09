@@ -83,6 +83,24 @@ typedef struct smem_struct
 }SMEM;
 
 #define SAL_PFD 16
+#define BATCH_FWD_SIZE 8
+
+typedef struct batch_fwd_state
+{
+    SMEM smem;
+    int j;
+    int32_t rid;
+    int x;
+    int next_x;
+    int offset;
+    int readlength;
+    int numPrev;
+    int done;
+    int eligible;
+    int32_t min_intv;
+    uint32_t matchIdx;
+    SMEM *prevArray;
+} BatchFwdState;
 
 class FMI_search: public indexEle
 {
