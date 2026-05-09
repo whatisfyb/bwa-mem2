@@ -29,6 +29,7 @@
 
 #include <stdlib.h>
 #include <stdint.h>
+#include <string.h>
 #include <assert.h>
 #if defined(__ARM_NEON) || defined(__aarch64__)
 #include "simd_compat.h"
@@ -117,7 +118,6 @@ kswr_t ksw_u8(kswq_t *q, int tlen, const uint8_t *target,
 			  int xtra) // the first gap costs -(_o+_e)
 {
 	int slen, i, m_b, n_b, te = -1, gmax = 0, minsc, endsc;
-	uint64_t *b;
 	__m128i zero, oe_del, e_del, oe_ins, e_ins, shift, *H0, *H1, *E, *Hmax;
 	kswr_t r;
 
@@ -133,7 +133,13 @@ kswr_t ksw_u8(kswq_t *q, int tlen, const uint8_t *target,
 	r = g_defr;
 	minsc = (xtra & KSW_XSUBO)? xtra & 0xffff : 0x10000;
 	endsc = (xtra & KSW_XSTOP)? xtra & 0xffff : 0x10000;
-	m_b = n_b = 0; b = 0;
+	m_b = n_b = 0;
+	/* 预分配b[]：大多数比对只需<64个条目，用栈上空间避免malloc/realloc。
+	 * 仅当条目数超过栈预分配大小时才fallback到堆分配。
+	 * ksw_u8占33%运行时，消除每调用的realloc有显著收益。 */
+	uint64_t b_stack[64];
+	uint64_t *b = b_stack;
+	m_b = 64;
 	zero = _mm_set1_epi32(0);
 	oe_del = _mm_set1_epi8(_o_del + _e_del);
 	e_del = _mm_set1_epi8(_e_del);
@@ -198,8 +204,13 @@ end_loop16:
 		if (imax >= minsc) { // write the b array; this condition adds branching unfornately
 			if (n_b == 0 || (int32_t)b[n_b-1] + 1 != i) { // then append
 				if (n_b == m_b) {
-					m_b = m_b? m_b<<1 : 8;
-					b = (uint64_t*) realloc (b, 8 * m_b);
+					m_b <<= 1;
+					if (b == b_stack) {
+						b = (uint64_t*)malloc(8 * m_b);
+						memcpy(b, b_stack, 8 * n_b);
+					} else {
+						b = (uint64_t*)realloc(b, 8 * m_b);
+					}
 				}
 				b[n_b++] = (uint64_t)imax<<32 | i;
 			} else if ((int)(b[n_b-1]>>32) < imax) b[n_b-1] = (uint64_t)imax<<32 | i; // modify the last
@@ -231,14 +242,13 @@ end_loop16:
 			}			
 		}
 	}
-	free(b);
+	if (b != b_stack) free(b);
 	return r;
 }
 
 kswr_t ksw_i16(kswq_t *q, int tlen, const uint8_t *target, int _o_del, int _e_del, int _o_ins, int _e_ins, int xtra) // the first gap costs -(_o+_e)
 {
 	int slen, i, m_b, n_b, te = -1, gmax = 0, minsc, endsc;
-	uint64_t *b;
 	__m128i zero, oe_del, e_del, oe_ins, e_ins, *H0, *H1, *E, *Hmax;
 	kswr_t r;
 
@@ -253,7 +263,10 @@ kswr_t ksw_i16(kswq_t *q, int tlen, const uint8_t *target, int _o_del, int _e_de
 	r = g_defr;
 	minsc = (xtra&KSW_XSUBO)? xtra&0xffff : 0x10000;
 	endsc = (xtra&KSW_XSTOP)? xtra&0xffff : 0x10000;
-	m_b = n_b = 0; b = 0;
+	m_b = n_b = 0;
+	uint64_t b_stack_i16[64];
+	uint64_t *b = b_stack_i16;
+	m_b = 64;
 	zero = _mm_set1_epi32(0);
 	oe_del = _mm_set1_epi16(_o_del + _e_del);
 	e_del = _mm_set1_epi16(_e_del);
@@ -305,8 +318,13 @@ end_loop8:
 		if (imax >= minsc) {
 			if (n_b == 0 || (int32_t)b[n_b-1] + 1 != i) {
 				if (n_b == m_b) {
-					m_b = m_b? m_b<<1 : 8;
-					b = (uint64_t*)realloc(b, 8 * m_b);
+					m_b <<= 1;
+					if (b == b_stack_i16) {
+						b = (uint64_t*)malloc(8 * m_b);
+						memcpy(b, b_stack_i16, 8 * n_b);
+					} else {
+						b = (uint64_t*)realloc(b, 8 * m_b);
+					}
 				}
 				b[n_b++] = (uint64_t)imax<<32 | i;
 			} else if ((int)(b[n_b-1]>>32) < imax) b[n_b-1] = (uint64_t)imax<<32 | i; // modify the last
@@ -337,7 +355,7 @@ end_loop8:
 		}
 	}
 
-	free(b);
+	if (b != b_stack_i16) free(b);
 	return r;
 }
 
