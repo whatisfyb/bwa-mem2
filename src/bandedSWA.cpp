@@ -4183,13 +4183,13 @@ static inline __m128i _mm_blendv_epi8 (__m128i x, __m128i y, __m128i mask)
 #define MAIN_CODE8(s1, s2, h00, h11, e11, f11, f21, zero128,  maxScore128, e_ins128, oe_ins128, e_del128, oe_del128, y128, maxRS) \
     {                                                                   \
         __m128i cmp11 = _mm_cmpeq_epi8(s1, s2);                         \
-        __m128i sbt11 = _mm_blendv_epi8(mismatch128, match128, cmp11);  \
+        __m128i sbt11 = _mm_blendv_epi8_inline(mismatch128, match128, cmp11);  \
         __m128i tmp128 = _mm_max_epu8(s1, s2);                          \
         tmp128 = _mm_cmpeq_epi8(tmp128, ff128);                         \
-        sbt11 = _mm_blendv_epi8(sbt11, w_ambig_128, tmp128);            \
+        sbt11 = _mm_blendv_epi8_inline(sbt11, w_ambig_128, tmp128);            \
         __m128i m11 = _mm_add_epi8(h00, sbt11);                         \
         cmp11 = _mm_cmpeq_epi8(h00, zero128);                           \
-        m11 = _mm_blendv_epi8(m11, zero128, cmp11);                     \
+        m11 = _mm_blendv_epi8_inline(m11, zero128, cmp11);                     \
         m11 = _mm_and_si128(m11, _mm_cmpgt_epi8(m11, zero128));         \
         h11 = _mm_max_epu8(m11, e11);                                   \
         h11 = _mm_max_epu8(h11, f11);                                   \
@@ -4669,8 +4669,8 @@ void BandedPairWiseSW::smithWaterman128_8(uint8_t seq1SoA[],
             __m128i cmp2 = _mm_cmpgt_epi8(pj128, tail128);
             cmp1 = _mm_or_si128(cmp1, cmp2);
             //__m128i cmpt = _mm_xor_si128(cmp1, ff128);
-            h10 = _mm_blendv_epi8(h10, zero128, cmp1);
-            f21 = _mm_blendv_epi8(f21, zero128, cmp1);
+            h10 = _mm_blendv_epi8_inline(h10, zero128, cmp1);
+            f21 = _mm_blendv_epi8_inline(f21, zero128, cmp1);
             
             // got this block out of MAIN_CODE
             __m128i bmaxRS = maxRS1;                                        
@@ -4680,9 +4680,9 @@ void BandedPairWiseSW::smithWaterman128_8(uint8_t seq1SoA[],
             cmpA = _mm_or_si128(cmpA, cmpB);
             cmp1 = _mm_cmpgt_epi8(j128, tail128);
             cmp1 = _mm_or_si128(cmp1, cmp2);
-            cmpA = _mm_blendv_epi8(y1_128, j128, cmpA);
-            y1_128 = _mm_blendv_epi8(cmpA, y1_128, cmp1);
-            maxRS1 = _mm_blendv_epi8(maxRS1, bmaxRS, cmp1);                     
+            cmpA = _mm_blendv_epi8_inline(y1_128, j128, cmpA);
+            y1_128 = _mm_blendv_epi8_inline(cmpA, y1_128, cmp1);
+            maxRS1 = _mm_blendv_epi8_inline(maxRS1, bmaxRS, cmp1);                     
 
             _mm_store_si128((__m128i *)(F + j * SIMD_WIDTH8), f21);
             _mm_store_si128((__m128i *)(H_h + j * SIMD_WIDTH8), h10);
@@ -4695,25 +4695,25 @@ void BandedPairWiseSW::smithWaterman128_8(uint8_t seq1SoA[],
                 __m128i cmp = _mm_cmpeq_epi8(j128, qlen128);
                 //__m128i max_gh = _mm_max_epi8(gscore, h11);      //epi8 not present, modif
                 __m128i cmp_gh = _mm_cmpgt_epi8(gscore, h11);
-                __m128i tmp128_1 = _mm_blendv_epi8(i1_128, max_ie128, cmp_gh);
-                __m128i max_gh = _mm_blendv_epi8(h11, gscore, cmp_gh);
+                __m128i tmp128_1 = _mm_blendv_epi8_inline(i1_128, max_ie128, cmp_gh);
+                __m128i max_gh = _mm_blendv_epi8_inline(h11, gscore, cmp_gh);
                 
-                tmp128_1 = _mm_blendv_epi8(max_ie128, tmp128_1, cmp);
-                tmp128_1 = _mm_blendv_epi8(max_ie128, tmp128_1, exit0);
+                tmp128_1 = _mm_blendv_epi8_inline(max_ie128, tmp128_1, cmp);
+                tmp128_1 = _mm_blendv_epi8_inline(max_ie128, tmp128_1, exit0);
                 
-                max_gh = _mm_blendv_epi8(gscore, max_gh, exit0);
-                max_gh = _mm_blendv_epi8(gscore, max_gh, cmp);              
+                max_gh = _mm_blendv_epi8_inline(gscore, max_gh, exit0);
+                max_gh = _mm_blendv_epi8_inline(gscore, max_gh, cmp);              
             
                 cmp = _mm_cmpgt_epi8(j128, tail128); 
-                max_gh = _mm_blendv_epi8(max_gh, gscore, cmp);
-                max_ie128 = _mm_blendv_epi8(tmp128_1, max_ie128, cmp);
+                max_gh = _mm_blendv_epi8_inline(max_gh, gscore, cmp);
+                max_ie128 = _mm_blendv_epi8_inline(tmp128_1, max_ie128, cmp);
                 gscore = max_gh;
             }
         }
         __m128i cmp1 = _mm_cmpgt_epi8(head128, j128);
         __m128i cmp2 = _mm_cmpgt_epi8(j128, tail128);
         cmp1 = _mm_or_si128(cmp1, cmp2);
-        h10 = _mm_blendv_epi8(h10, zero128, cmp1);
+        h10 = _mm_blendv_epi8_inline(h10, zero128, cmp1);
             
         _mm_store_si128((__m128i *)(H_h + j * SIMD_WIDTH8), h10);
         _mm_store_si128((__m128i *)(F + j * SIMD_WIDTH8), zero128);

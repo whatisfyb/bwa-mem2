@@ -100,6 +100,25 @@ extern "C" int _movemask_epi8_neon(uint8x16_t a);
 })
 
 /*
+ * _mm_blendv_epi8_inline: fully inlined blendv using NEON bitwise ops.
+ * _mm_blendv_epi8(a, b, mask) = (a & ~mask) | (b & mask)
+ * NEON: vbicq_u8 + vandq_u8 + vorrq_u8 (3 instructions, 1 cycle each)
+ *
+ * This eliminates the function call overhead of _blendv_epi8_neon(), allowing
+ * the compiler to interleave blendv instructions with surrounding computation.
+ *
+ * WARNING: Only use this in the tightest inner loops (MAIN_CODE8 + j-loop body).
+ * Do NOT use in the post-loop narrowing section — inlining all ~33 blendv
+ * calls per row causes +54% regression due to code bloat destroying icache.
+ */
+#define _mm_blendv_epi8_inline(a, b, mask) __extension__({ \
+    __m128i _r; \
+    uint8x16_t _a = (a).vect_u8, _b = (b).vect_u8, _m = (mask).vect_u8; \
+    _r.vect_u8 = vorrq_u8(vbicq_u8(_a, _m), vandq_u8(_b, _m)); \
+    _r; \
+})
+
+/*
  * _mm_movemask_epi8 macro override: INLINE expansion using NEON intrinsics.
  *
  * Previous approach (_movemask_epi8_neon function call) eliminated fmov overhead
