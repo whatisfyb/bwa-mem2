@@ -195,7 +195,13 @@ typedef struct {
 			return;														\
 		}																\
 		for (d = 2; 1ul<<d < n; ++d);									\
-		stack = (ks_isort_stack_t*)malloc(sizeof(ks_isort_stack_t) * ((sizeof(size_t)*d)+2)); \
+		size_t stack_sz = sizeof(ks_isort_stack_t) * ((sizeof(size_t)*d)+2); \
+		ks_isort_stack_t stack_buf[128]; /* 2KB栈缓冲，覆盖n<2^48 */		\
+		if (stack_sz <= sizeof(stack_buf)) {								\
+			stack = stack_buf;											\
+		} else {														\
+			stack = (ks_isort_stack_t*)malloc(stack_sz);					\
+		}																\
         assert(stack != NULL);                                          \
 		top = stack; s = a; t = a + (n-1); d <<= 1;						\
 		while (1) {														\
@@ -227,7 +233,7 @@ typedef struct {
 				}														\
 			} else {													\
 				if (top == stack) {										\
-					free(stack);										\
+					if (stack != stack_buf) free(stack);				\
 					__ks_insertsort_##name(a, a+n);						\
 					return;												\
 				} else { --top; s = (type_t*)top->left; t = (type_t*)top->right; d = top->depth; } \
