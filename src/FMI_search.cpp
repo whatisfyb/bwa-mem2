@@ -1028,12 +1028,24 @@ SMEM FMI_search::backwardExt(SMEM smem, uint8_t a)
     uint8_t b;
 
     int64_t k[4], l[4], s[4];
+    
+    /* B1: Hoist computations that are independent of loop variable b.
+     * sp, ep, occ_id, y, and mask don't change across the 4 bases (A/C/G/T),
+     * so compute them once instead of 4 times. Saves ~7 each of >>, &, and
+     * one_hot_mask_array loads per backwardExt call. */
+    int64_t sp = (int64_t)(smem.k);
+    int64_t ep = sp + (int64_t)(smem.s);
+    int64_t occ_id_sp = sp >> CP_SHIFT, y_sp = sp & CP_MASK;
+    int64_t occ_id_ep = ep >> CP_SHIFT, y_ep = ep & CP_MASK;
+    uint64_t mask_sp = one_hot_mask_array[y_sp];
+    uint64_t mask_ep = one_hot_mask_array[y_ep];
+    
     for(b = 0; b < 4; b++)
     {
-        int64_t sp = (int64_t)(smem.k);
-        int64_t ep = (int64_t)(smem.k) + (int64_t)(smem.s);
-        GET_OCC(sp, b, occ_id_sp, y_sp, occ_sp, one_hot_bwt_str_c_sp, match_mask_sp);
-        GET_OCC(ep, b, occ_id_ep, y_ep, occ_ep, one_hot_bwt_str_c_ep, match_mask_ep);
+        int64_t occ_sp = cp_occ[occ_id_sp].cp_count[b];
+        occ_sp += popcount64(cp_occ[occ_id_sp].one_hot_bwt_str[b] & mask_sp);
+        int64_t occ_ep = cp_occ[occ_id_ep].cp_count[b];
+        occ_ep += popcount64(cp_occ[occ_id_ep].one_hot_bwt_str[b] & mask_ep);
         k[b] = count[b] + occ_sp;
         s[b] = occ_ep - occ_sp;
     }
