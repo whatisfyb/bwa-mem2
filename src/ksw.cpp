@@ -153,31 +153,58 @@ kswr_t ksw_u8(kswq_t *q, int tlen, const uint8_t *target,
 		__m128i e, h, t, f = zero, max = zero, *S = q->qp + target[i] * slen; // s is the 1st score vector
 		h = _mm_load_si128(H0 + slen - 1); // h={2,5,8,11,14,17,-1,-1} in the above example
 		h = _mm_slli_si128(h, 1); // h=H(i-1,-1); << instead of >> because x64 is little-endian
-		for (j = 0; LIKELY(j < slen); ++j) {
-			/* SW cells are computed in the following order:
-			 *   H(i,j)   = max{H(i-1,j-1)+S(i,j), E(i,j), F(i,j)}
-			 *   E(i+1,j) = max{H(i,j)-q, E(i,j)-r}
-			 *   F(i,j+1) = max{H(i,j)-q, F(i,j)-r}
-			 */
-			// compute H'(i,j); note that at the beginning, h=H'(i-1,j-1)
+		/* KSW-2CELL: 2-way unrolled j-loop to reduce loop overhead */
+		j = 0;
+		for ( ; LIKELY(j + 1 < slen); j += 2) {
+			/* Cell j */
 			h = _mm_adds_epu8(h, _mm_load_si128(S + j));
-			h = _mm_subs_epu8(h, shift); // h=H'(i-1,j-1)+S(i,j)
-			e = _mm_load_si128(E + j); // e=E'(i,j)
+			h = _mm_subs_epu8(h, shift);
+			e = _mm_load_si128(E + j);
 			h = _mm_max_epu8(h, e);
-			h = _mm_max_epu8(h, f); // h=H'(i,j)
-			max = _mm_max_epu8(max, h); // set max
-			_mm_store_si128(H1 + j, h); // save to H'(i,j)
-			// now compute E'(i+1,j)
-			e = _mm_subs_epu8(e, e_del); // e=E'(i,j) - e_del
-			t = _mm_subs_epu8(h, oe_del); // h=H'(i,j) - o_del - e_del
-			e = _mm_max_epu8(e, t); // e=E'(i+1,j)
-			_mm_store_si128(E + j, e); // save to E'(i+1,j)
-			// now compute F'(i,j+1)
+			h = _mm_max_epu8(h, f);
+			max = _mm_max_epu8(max, h);
+			_mm_store_si128(H1 + j, h);
+			e = _mm_subs_epu8(e, e_del);
+			t = _mm_subs_epu8(h, oe_del);
+			e = _mm_max_epu8(e, t);
+			_mm_store_si128(E + j, e);
 			f = _mm_subs_epu8(f, e_ins);
-			t = _mm_subs_epu8(h, oe_ins); // h=H'(i,j) - o_ins - e_ins
+			t = _mm_subs_epu8(h, oe_ins);
 			f = _mm_max_epu8(f, t);
-			// get H'(i-1,j) and prepare for the next j
-			h = _mm_load_si128(H0 + j); // h=H'(i-1,j)
+			h = _mm_load_si128(H0 + j);
+			/* Cell j+1 */
+			h = _mm_adds_epu8(h, _mm_load_si128(S + j + 1));
+			h = _mm_subs_epu8(h, shift);
+			e = _mm_load_si128(E + j + 1);
+			h = _mm_max_epu8(h, e);
+			h = _mm_max_epu8(h, f);
+			max = _mm_max_epu8(max, h);
+			_mm_store_si128(H1 + j + 1, h);
+			e = _mm_subs_epu8(e, e_del);
+			t = _mm_subs_epu8(h, oe_del);
+			e = _mm_max_epu8(e, t);
+			_mm_store_si128(E + j + 1, e);
+			f = _mm_subs_epu8(f, e_ins);
+			t = _mm_subs_epu8(h, oe_ins);
+			f = _mm_max_epu8(f, t);
+			h = _mm_load_si128(H0 + j + 1);
+		}
+		/* Tail: single cell if slen is odd */
+		if (j < slen) {
+			h = _mm_adds_epu8(h, _mm_load_si128(S + j));
+			h = _mm_subs_epu8(h, shift);
+			e = _mm_load_si128(E + j);
+			h = _mm_max_epu8(h, e);
+			h = _mm_max_epu8(h, f);
+			max = _mm_max_epu8(max, h);
+			_mm_store_si128(H1 + j, h);
+			e = _mm_subs_epu8(e, e_del);
+			t = _mm_subs_epu8(h, oe_del);
+			e = _mm_max_epu8(e, t);
+			_mm_store_si128(E + j, e);
+			f = _mm_subs_epu8(f, e_ins);
+			t = _mm_subs_epu8(h, oe_ins);
+			f = _mm_max_epu8(f, t);
 		}
 		// NB: we do not need to set E(i,j) as we disallow adjecent insertion and then deletion
 		for (k = 0; LIKELY(k < 16); ++k) { // this block mimics SWPS3; NB: H(i,j) updated in the lazy-F loop cannot exceed max
