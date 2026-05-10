@@ -333,11 +333,11 @@ private:
     int8_t w_open;
     int8_t w_extend;
     int8_t w_ambig;
-    int8_t *F8_;
-    int8_t *H8_, *H8__;
+    int8_t *FH8_;           /* P6: interleaved F+H buffer (stride 32) */
+    int8_t *H8__;           /* separate H_v buffer */
     
-    int16_t *F16_;
-    int16_t *H16_, *H16__;
+    int16_t *FH16_;         /* P6: interleaved F+H buffer for 16-bit */
+    int16_t *H16__;         /* separate H_v buffer for 16-bit */
 
     int64_t sort1Ticks;
     int64_t setupTicks;
