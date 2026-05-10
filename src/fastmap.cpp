@@ -135,7 +135,10 @@ void memoryAlloc(ktp_aux_t *aux, worker_t &w, int32_t nreads, int32_t nthreads)
 
 
     /* SWA mem allocation */
-    int64_t wsize = BATCH_SIZE * SEEDS_PER_READ;
+    // P4: 缩减初始预分配大小，从SEEDS_PER_READ(500)降至AVG_SEEDS_PER_READ(64)
+    // 实际使用远低于256K条目，缩减后减少TLB压力和内存占用
+    // 已有的realloc机制会在需要时自动扩展
+    int64_t wsize = BATCH_SIZE * AVG_SEEDS_PER_READ;
     for(int l=0; l<nthreads; l++)
     {
         w.mmc.seqBufLeftRef[l*CACHE_LINE]  = (uint8_t *)
