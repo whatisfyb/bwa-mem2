@@ -3397,13 +3397,13 @@ _mm_blendv_epi16(__m128i x, __m128i y, __m128i mask)
 #define MAIN_CODE16(s1, s2, h00, h11, e11, f11, f21, zero256,  maxScore128, e_ins128, oe_ins128, e_del128, oe_del128, y128, maxRS) \
     {                                                                   \
         __m128i cmp11 = _mm_cmpeq_epi16(s1, s2);                        \
-        __m128i sbt11 = _mm_blendv_epi16(mismatch128, match128, cmp11); \
+        __m128i sbt11 = _mm_blendv_epi16_inline(mismatch128, match128, cmp11); \
         __m128i tmp128 = _mm_max_epu16(s1, s2);                         \
         tmp128 = _mm_cmpeq_epi16(tmp128, ff128);                        \
-        sbt11 = _mm_blendv_epi16(sbt11, w_ambig_128, tmp128);           \
+        sbt11 = _mm_blendv_epi16_inline(sbt11, w_ambig_128, tmp128);    \
         __m128i m11 = _mm_add_epi16(h00, sbt11);                        \
         cmp11 = _mm_cmpeq_epi16(h00, zero128);                          \
-        m11 = _mm_blendv_epi16(m11, zero128, cmp11);                    \
+        m11 = _mm_blendv_epi16_inline(m11, zero128, cmp11);             \
         h11 = _mm_max_epi16(m11, e11);                                  \
         h11 = _mm_max_epi16(h11, f11);                                  \
         __m128i temp128 = _mm_sub_epi16(m11, oe_ins128);                \
@@ -3946,8 +3946,8 @@ void BandedPairWiseSW::smithWaterman128_16(uint16_t seq1SoA[],
             __m128i cmp1 = _mm_cmpgt_epi16(head128, pj128);
             __m128i cmp2 = _mm_cmpgt_epi16(pj128, tail128);
             cmp1 = _mm_or_si128(cmp1, cmp2);
-            h10 = _mm_blendv_epi16(h10, zero128, cmp1);
-            f21 = _mm_blendv_epi16(f21, zero128, cmp1);
+            h10 = _mm_blendv_epi16_inline(h10, zero128, cmp1);
+            f21 = _mm_blendv_epi16_inline(f21, zero128, cmp1);
             
             __m128i bmaxRS = maxRS1;                                        
             maxRS1 =_mm_max_epi16(maxRS1, h11);                         
@@ -3956,9 +3956,9 @@ void BandedPairWiseSW::smithWaterman128_16(uint16_t seq1SoA[],
             cmpA = _mm_or_si128(cmpA, cmpB);
             cmp1 = _mm_cmpgt_epi16(j128, tail128); // change
             cmp1 = _mm_or_si128(cmp1, cmp2);            // change           
-            cmpA = _mm_blendv_epi16(y1_128, j128, cmpA);
-            y1_128 = _mm_blendv_epi16(cmpA, y1_128, cmp1);
-            maxRS1 = _mm_blendv_epi16(maxRS1, bmaxRS, cmp1);                        
+            cmpA = _mm_blendv_epi16_inline(y1_128, j128, cmpA);
+            y1_128 = _mm_blendv_epi16_inline(cmpA, y1_128, cmp1);
+            maxRS1 = _mm_blendv_epi16_inline(maxRS1, bmaxRS, cmp1);                        
 
             _mm_store_si128((__m128i *)(F + j * (2 * SIMD_WIDTH16)), f21);
             _mm_store_si128((__m128i *)(H_h + j * (2 * SIMD_WIDTH16)), h10);
@@ -3971,17 +3971,17 @@ void BandedPairWiseSW::smithWaterman128_16(uint16_t seq1SoA[],
                 __m128i cmp = _mm_cmpeq_epi16(j128, qlen128);
                 __m128i max_gh = _mm_max_epi16(gscore, h11);
                 __m128i cmp_gh = _mm_cmpgt_epi16(gscore, h11);
-                __m128i tmp128_1 = _mm_blendv_epi16(i1_128, max_ie128, cmp_gh);
+                __m128i tmp128_1 = _mm_blendv_epi16_inline(i1_128, max_ie128, cmp_gh);
 
-                __m128i tmp128_t = _mm_blendv_epi16(max_ie128, tmp128_1, cmp);
-                tmp128_1 = _mm_blendv_epi16(max_ie128, tmp128_t, exit0);                
+                __m128i tmp128_t = _mm_blendv_epi16_inline(max_ie128, tmp128_1, cmp);
+                tmp128_1 = _mm_blendv_epi16_inline(max_ie128, tmp128_t, exit0);                
                 
-                max_gh = _mm_blendv_epi16(gscore, max_gh, exit0);
-                max_gh = _mm_blendv_epi16(gscore, max_gh, cmp);             
+                max_gh = _mm_blendv_epi16_inline(gscore, max_gh, exit0);
+                max_gh = _mm_blendv_epi16_inline(gscore, max_gh, cmp);             
 
                 cmp = _mm_cmpgt_epi16(j128, tail128); 
-                max_gh = _mm_blendv_epi16(max_gh, gscore, cmp);
-                max_ie128 = _mm_blendv_epi16(tmp128_1, max_ie128, cmp);
+                max_gh = _mm_blendv_epi16_inline(max_gh, gscore, cmp);
+                max_ie128 = _mm_blendv_epi16_inline(tmp128_1, max_ie128, cmp);
                 gscore = max_gh;
             }
         }
@@ -4030,7 +4030,7 @@ void BandedPairWiseSW::smithWaterman128_16(uint16_t seq1SoA[],
 #endif
         
         /* Narrowing of the band */
-        /* From beg */
+        /* Scan1: forward, find nbeg */
         int l;
         for (l = beg; l < end; l++)
         {
@@ -4038,80 +4038,66 @@ void BandedPairWiseSW::smithWaterman128_16(uint16_t seq1SoA[],
             __m128i h128 = _mm_load_si128((__m128i *)(H_h + l * (2 * SIMD_WIDTH16)));
             __m128i tmp = _mm_or_si128(f128, h128);
             tmp = _mm_cmpeq_epi16(tmp, zero128);
-            // uint16_t val = _mm_movepi16_mask(tmp);
             uint16_t val = _mm_movemask_epi8(tmp) & dmask16;
             if (val == dmask16) nbeg = l;
             else
                 break;
         }
         
-        /* From end */
-        bool flg = 1;
+        /* Merged backward scan: scan2 (nend) + scan4 (tail128) in one pass */
+        __m128i exit1 = _mm_xor_si128(exit0, ff128);
+        __m128i index128 = tail128;
+        __m128i tmpb = ff128;
+        __m128i l128 = _mm_set1_epi16(end);
+        int nend_found = 0;
+        int nend_l = end;
+        
         for (l = end; l >= beg; l--)
         {
             __m128i f128 = _mm_load_si128((__m128i *)(F + l * (2 * SIMD_WIDTH16)));
             __m128i h128 = _mm_load_si128((__m128i *)(H_h + l * (2 * SIMD_WIDTH16)));
-            __m128i tmp = _mm_or_si128(f128, h128);
+            __m128i fh = _mm_or_si128(f128, h128);
+            
+            /* scan2: check raw F|H for nend */
+            if (!nend_found) {
+                __m128i raw_zero = _mm_cmpeq_epi16(fh, zero128);
+                uint16_t raw_val = _mm_movemask_epi8(raw_zero) & dmask16;
+                if (raw_val != dmask16) {
+                    nend_l = l;
+                    nend_found = 1;
+                }
+            }
+            
+            /* scan4: update tail128 */
+            __m128i tmp = _mm_or_si128(fh, exit1);
             tmp = _mm_cmpeq_epi16(tmp, zero128);
-            // uint16_t val = _mm_movepi16_mask(tmp);
-            uint16_t val = _mm_movemask_epi8(tmp) & dmask16;
-            if (val != dmask16 && flg)  
-                break;
-        }
-        nend = l + 2 < ncol? l + 2: ncol;
-
-        __m128i tmpb = ff128;
-
-        __m128i exit1 = _mm_xor_si128(exit0, ff128);
-        __m128i l128 = _mm_set1_epi16(beg);
-        for (l = beg; l < end; l++)
-        {
-            __m128i f128 = _mm_load_si128((__m128i *)(F + l * (2 * SIMD_WIDTH16)));
-            __m128i h128 = _mm_load_si128((__m128i *)(H_h + l * (2 * SIMD_WIDTH16)));
-    
-            __m128i tmp = _mm_or_si128(f128, h128);
-            tmp = _mm_or_si128(tmp, exit1);         
-            tmp = _mm_cmpeq_epi16(tmp, zero128);
-            // uint32_t val = _mm_movemask_epi16(tmp);
-            // uint16_t val = _mm_movepi16_mask(tmp);
             uint16_t val = _mm_movemask_epi8(tmp) & dmask16;
             if (val == 0x00) {
                 break;
             }
-            tmp = _mm_and_si128(tmp,tmpb);
-            //__m128i l128 = _mm_set1_epi16(l+1);
-            l128 = _mm_add_epi16(l128, one128);
-            // NEW
-            head128 = _mm_blendv_epi16(head128, l128, tmp);
-
-            tmpb = tmp;         
+            tmp = _mm_and_si128(tmp, tmpb);
+            l128 = _mm_sub_epi16(l128, one128);
+            index128 = _mm_blendv_epi16(index128, l128, tmp);
+            tmpb = tmp;
         }
-        // _mm_store_si128((__m128i *) head, head128);
-        
-        __m128i  index128 = tail128;
-        tmpb = ff128;
+        nend = nend_l + 2 < ncol? nend_l + 2: ncol;
 
-        l128 = _mm_set1_epi16(end);
-        for (l = end; l >= beg; l--)
+        // scan3: forward, update head128
+        __m128i tmpb_h = ff128;
+        __m128i l128_h = _mm_set1_epi16(beg);
+        for (l = beg; l < end; l++)
         {
             __m128i f128 = _mm_load_si128((__m128i *)(F + l * (2 * SIMD_WIDTH16)));
             __m128i h128 = _mm_load_si128((__m128i *)(H_h + l * (2 * SIMD_WIDTH16)));
-            
             __m128i tmp = _mm_or_si128(f128, h128);
             tmp = _mm_or_si128(tmp, exit1);
-            tmp = _mm_cmpeq_epi16(tmp, zero128);            
-            // uint32_t val = _mm_movemask_epi16(tmp);
-            // uint16_t val = _mm_movepi16_mask(tmp);
+            tmp = _mm_cmpeq_epi16(tmp, zero128);
             uint16_t val = _mm_movemask_epi8(tmp) & dmask16;
-            if (val == 0x00)  {
-                break;
-            }
-            tmp = _mm_and_si128(tmp,tmpb);
-            l128 = _mm_sub_epi16(l128, one128);
-            // NEW
-            index128 = _mm_blendv_epi8(index128, l128, tmp);
-
-            tmpb = tmp;
+            if (val == 0x00) break;
+            tmp = _mm_and_si128(tmp, tmpb_h);
+            l128_h = _mm_add_epi16(l128_h, one128);
+            head128 = _mm_blendv_epi16(head128, l128_h, tmp);
+            tmpb_h = tmp;
         }
         index128 = _mm_add_epi16(index128, two128);
         tail128 = _mm_min_epi16(index128, qlen128);
