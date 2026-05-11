@@ -735,79 +735,200 @@ int64_t FMI_search::bwtSeedStrategyAllPosOneThread(uint8_t *enc_qdb,
 
     int64_t numTotalSeed = 0;
 
-    for(i = 0; i < numReads; i++)
+#define SEED_BATCH_SIZE 8
+    struct SeedState {
+        int32_t rid;
+        int16_t x, j, readlength;
+        int32_t offset;
+        SMEM smem;
+        int next_x;
+        bool active;
+        bool found;
+    };
+
+    for(i = 0; i < numReads; i += SEED_BATCH_SIZE)
     {
-        int readlength = seq_[i].l_seq;
-        int16_t x = 0;
-        while(x < readlength)
+        int32_t batch = (i + SEED_BATCH_SIZE <= numReads) ? SEED_BATCH_SIZE : (numReads - i);
+        SeedState states[SEED_BATCH_SIZE];
+
+        // Phase A: Initialize batch — find the first valid seed start for each read
+        int numActive = 0;
+        for(int b = 0; b < batch; b++)
         {
-            int next_x = x + 1;
+            int32_t rid = i + b;
+            int readlength = seq_[rid].l_seq;
+            states[b].rid = rid;
+            states[b].readlength = readlength;
+            states[b].offset = query_cum_len_ar[rid];
+            states[b].x = 0;
+            states[b].active = false;
+            states[b].found = false;
 
-            // Forward search
-            SMEM smem;
-            smem.rid = i;
-            smem.m = x;
-            smem.n = x;
-            
-            int offset = query_cum_len_ar[i];
-            uint8_t a = enc_qdb[offset + x];
-            // uint8_t a = enc_qdb[i * readlength + x];
-
-            if(a < 4)
+            // Find first valid position
+            while(states[b].x < readlength)
             {
-                smem.k = count[a];
-                smem.l = count[3 - a];
-                smem.s = count[a+1] - count[a];
-
-
-                int j;
-                for(j = x + 1; j < readlength; j++)
+                uint8_t a = enc_qdb[states[b].offset + states[b].x];
+                if(a < 4)
                 {
-                    next_x = j + 1;
-                    // a = enc_qdb[i * readlength + j];
-                    a = enc_qdb[offset + j];
-                    if(a < 4)
-                    {
-                        SMEM smem_ = smem;
+                    states[b].smem.rid = rid;
+                    states[b].smem.m = states[b].x;
+                    states[b].smem.n = states[b].x;
+                    states[b].smem.k = count[a];
+                    states[b].smem.l = count[3 - a];
+                    states[b].smem.s = count[a+1] - count[a];
+                    states[b].j = states[b].x + 1;
+                    states[b].next_x = states[b].x + 1;
+                    states[b].active = true;
+                    states[b].found = false;
+                    numActive++;
+                    break;
+                }
+                states[b].x++;
+            }
+        }
 
-                        // Forward extension is backward extension with the BWT of reverse complement
-                        smem_.k = smem.l;
-                        smem_.l = smem.k;
-                        SMEM newSmem_ = backwardExt(smem_, 3 - a);
-                        //SMEM smem = backwardExt(smem, 3 - a);
-                        //smem.n = j;
-                        SMEM newSmem = newSmem_;
-                        newSmem.k = newSmem_.l;
-                        newSmem.l = newSmem_.k;
-                        newSmem.n = j;
-                        smem = newSmem;
-#ifdef ENABLE_PREFETCH
-                        _mm_prefetch((const char *)(&cp_occ[(smem.k) >> CP_SHIFT]), _MM_HINT_T0);
-                        _mm_prefetch((const char *)(&cp_occ[(smem.l) >> CP_SHIFT]), _MM_HINT_T0);
+        // Phase B: Interleaved forward extension across reads
+        while(numActive > 0)
+        {
+            // Pass A: Batch prefetch cp_occ for all active reads
+#ifdef __aarch64__
+            for(int b = 0; b < batch; b++)
+            {
+                if(!states[b].active) continue;
+                __asm__ volatile("prfm pldl2keep, [%0]" :: "r"(&cp_occ[states[b].smem.l >> CP_SHIFT]));
+                __asm__ volatile("prfm pldl2keep, [%0]" :: "r"(&cp_occ[states[b].smem.k >> CP_SHIFT]));
+            }
+#else
+            for(int b = 0; b < batch; b++)
+            {
+                if(!states[b].active) continue;
+                _mm_prefetch((const char *)(&cp_occ[(states[b].smem.k) >> CP_SHIFT]), _MM_HINT_T0);
+                _mm_prefetch((const char *)(&cp_occ[(states[b].smem.l) >> CP_SHIFT]), _MM_HINT_T0);
+            }
 #endif
 
+            // Pass B: Compute one forward extension step per active read
+            for(int b = 0; b < batch; b++)
+            {
+                if(!states[b].active) continue;
 
-                        if((smem.s < max_intv_array[i]) && ((smem.n - smem.m + 1) >= minSeedLen))
+                if(states[b].j >= states[b].readlength)
+                {
+                    // Reached end of read — this seed is done, move to next start position
+                    states[b].x = states[b].next_x;
+                    states[b].active = false;
+                    numActive--;
+
+                    // Find next valid seed start
+                    while(states[b].x < states[b].readlength)
+                    {
+                        uint8_t a = enc_qdb[states[b].offset + states[b].x];
+                        if(a < 4)
                         {
-
-                            if(smem.s > 0)
-                            {
-                                matchArray[numTotalSeed++] = smem;
-                            }
+                            states[b].smem.rid = states[b].rid;
+                            states[b].smem.m = states[b].x;
+                            states[b].smem.n = states[b].x;
+                            states[b].smem.k = count[a];
+                            states[b].smem.l = count[3 - a];
+                            states[b].smem.s = count[a+1] - count[a];
+                            states[b].j = states[b].x + 1;
+                            states[b].next_x = states[b].x + 1;
+                            states[b].active = true;
+                            states[b].found = false;
+                            numActive++;
                             break;
+                        }
+                        states[b].x++;
+                    }
+                    continue;
+                }
+
+                uint8_t a = enc_qdb[states[b].offset + states[b].j];
+                states[b].next_x = states[b].j + 1;
+
+                if(a < 4)
+                {
+                    SMEM smem_ = states[b].smem;
+                    smem_.k = states[b].smem.l;
+                    smem_.l = states[b].smem.k;
+                    SMEM newSmem_ = backwardExt(smem_, 3 - a);
+                    SMEM newSmem = newSmem_;
+                    newSmem.k = newSmem_.l;
+                    newSmem.l = newSmem_.k;
+                    newSmem.n = states[b].j;
+                    states[b].smem = newSmem;
+
+                    if((states[b].smem.s < max_intv_array[states[b].rid]) &&
+                       ((states[b].smem.n - states[b].smem.m + 1) >= minSeedLen))
+                    {
+                        if(states[b].smem.s > 0)
+                        {
+                            matchArray[numTotalSeed++] = states[b].smem;
+                        }
+                        // Seed found — move to next start position
+                        states[b].x = states[b].next_x;
+                        states[b].active = false;
+                        numActive--;
+
+                        // Find next valid seed start
+                        while(states[b].x < states[b].readlength)
+                        {
+                            uint8_t a2 = enc_qdb[states[b].offset + states[b].x];
+                            if(a2 < 4)
+                            {
+                                states[b].smem.rid = states[b].rid;
+                                states[b].smem.m = states[b].x;
+                                states[b].smem.n = states[b].x;
+                                states[b].smem.k = count[a2];
+                                states[b].smem.l = count[3 - a2];
+                                states[b].smem.s = count[a2+1] - count[a2];
+                                states[b].j = states[b].x + 1;
+                                states[b].next_x = states[b].x + 1;
+                                states[b].active = true;
+                                states[b].found = false;
+                                numActive++;
+                                break;
+                            }
+                            states[b].x++;
                         }
                     }
                     else
                     {
-
-                        break;
+                        states[b].j++;
                     }
                 }
+                else
+                {
+                    // Hit N character — seed ends here, move to next position
+                    states[b].x = states[b].next_x;
+                    states[b].active = false;
+                    numActive--;
 
+                    while(states[b].x < states[b].readlength)
+                    {
+                        uint8_t a2 = enc_qdb[states[b].offset + states[b].x];
+                        if(a2 < 4)
+                        {
+                            states[b].smem.rid = states[b].rid;
+                            states[b].smem.m = states[b].x;
+                            states[b].smem.n = states[b].x;
+                            states[b].smem.k = count[a2];
+                            states[b].smem.l = count[3 - a2];
+                            states[b].smem.s = count[a2+1] - count[a2];
+                            states[b].j = states[b].x + 1;
+                            states[b].next_x = states[b].x + 1;
+                            states[b].active = true;
+                            states[b].found = false;
+                            numActive++;
+                            break;
+                        }
+                        states[b].x++;
+                    }
+                }
             }
-            x = next_x;
         }
     }
+#undef SEED_BATCH_SIZE
     return numTotalSeed;
 }
 
@@ -1295,7 +1416,7 @@ void FMI_search::get_sa_entries_prefetch(SMEM *smemArray, int64_t *coordArray,
     
     id_ += id;
     
-    const int32_t sa_batch_size = 20;
+    const int32_t sa_batch_size = 12;
     int64_t working_set[sa_batch_size], map_pos[sa_batch_size];;
     int64_t offset[sa_batch_size] = {-1};
     
@@ -1307,13 +1428,22 @@ void FMI_search::get_sa_entries_prefetch(SMEM *smemArray, int64_t *coordArray,
         map_pos[j] = map_ar[i];
         offset[j] = 0;
         
-        if (pos & SA_COMPX_MASK == 0) {
+        if ((pos & SA_COMPX_MASK) == 0) {
+#ifdef __aarch64__
+            __asm__ volatile("prfm pldl2keep, [%0]" :: "r"(&sa_ms_byte[pos >> SA_COMPX]));
+            __asm__ volatile("prfm pldl2keep, [%0]" :: "r"(&sa_ls_word[pos >> SA_COMPX]));
+#else
             _mm_prefetch(&sa_ms_byte[pos >> SA_COMPX], _MM_HINT_T0);
             _mm_prefetch(&sa_ls_word[pos >> SA_COMPX], _MM_HINT_T0);
+#endif
         }
         else {
             int64_t occ_id_pp_ = pos >> CP_SHIFT;
+#ifdef __aarch64__
+            __asm__ volatile("prfm pldl2keep, [%0]" :: "r"(&cp_occ[occ_id_pp_]));
+#else
             _mm_prefetch(&cp_occ[occ_id_pp_], _MM_HINT_T0);
+#endif
         }
         i++;
         j++;
@@ -1344,13 +1474,22 @@ void FMI_search::get_sa_entries_prefetch(SMEM *smemArray, int64_t *coordArray,
                     map_pos[k] = map_ar[i++];
                     offset[k] = 0;
                     
-                    if (pos & SA_COMPX_MASK == 0) {
+                    if ((pos & SA_COMPX_MASK) == 0) {
+#ifdef __aarch64__
+                        __asm__ volatile("prfm pldl2keep, [%0]" :: "r"(&sa_ms_byte[pos >> SA_COMPX]));
+                        __asm__ volatile("prfm pldl2keep, [%0]" :: "r"(&sa_ls_word[pos >> SA_COMPX]));
+#else
                         _mm_prefetch(&sa_ms_byte[pos >> SA_COMPX], _MM_HINT_T0);
                         _mm_prefetch(&sa_ls_word[pos >> SA_COMPX], _MM_HINT_T0);
+#endif
                     }
                     else {
                         int64_t occ_id_pp_ = pos >> CP_SHIFT;
+#ifdef __aarch64__
+                        __asm__ volatile("prfm pldl2keep, [%0]" :: "r"(&cp_occ[occ_id_pp_]));
+#else
                         _mm_prefetch(&cp_occ[occ_id_pp_], _MM_HINT_T0);
+#endif
                     }
                 }
                 else
@@ -1358,13 +1497,22 @@ void FMI_search::get_sa_entries_prefetch(SMEM *smemArray, int64_t *coordArray,
             }
             else {
                 working_set[k] = sp;
-                if (sp & SA_COMPX_MASK == 0) {
+                if ((sp & SA_COMPX_MASK) == 0) {
+#ifdef __aarch64__
+                    __asm__ volatile("prfm pldl2keep, [%0]" :: "r"(&sa_ms_byte[sp >> SA_COMPX]));
+                    __asm__ volatile("prfm pldl2keep, [%0]" :: "r"(&sa_ls_word[sp >> SA_COMPX]));
+#else
                     _mm_prefetch(&sa_ms_byte[sp >> SA_COMPX], _MM_HINT_T0);
                     _mm_prefetch(&sa_ls_word[sp >> SA_COMPX], _MM_HINT_T0);
+#endif
                 }
                 else {
                     int64_t occ_id_pp_ = sp >> CP_SHIFT;
+#ifdef __aarch64__
+                    __asm__ volatile("prfm pldl2keep, [%0]" :: "r"(&cp_occ[occ_id_pp_]));
+#else
                     _mm_prefetch(&cp_occ[occ_id_pp_], _MM_HINT_T0);
+#endif
                 }                
             }
         }
