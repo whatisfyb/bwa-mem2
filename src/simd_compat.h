@@ -205,11 +205,34 @@ static inline void* aligned_alloc_compat(size_t alignment, size_t size)
  * Override AVX2KI's _mm_prefetch with a const void* version.
  * avx2ki.h may define _mm_prefetch(char const*, int) but x86 intrinsics
  * accept const void*, and bwa-mem2 passes non-char pointers directly.
+ *
+ * ARM PRFM policy mapping:
+ *   _MM_HINT_T0 (locality=3) → PLDL1STRM (streaming load to L1, less cache pollution)
+ *   _MM_HINT_T1 (locality=2) → PLDL2KEEP (load to L2, keep for reuse)
+ *   _MM_HINT_T2 (locality=1) → PLDL3KEEP (load to L3)
+ *   _MM_HINT_NTA (locality=0) → PLDL3STRM (streaming load to L3, minimal pollution)
+ *
+ * T0 uses STRM instead of KEEP because bwa-mem2's cp_occ/SA accesses are
+ * streaming (rarely reused within L1's 64KB), and KEEP evicts useful data.
+ * The STRM hint allocates the line in L1 without evicting existing lines.
  */
-#ifdef _mm_prefetch
-#undef _mm_prefetch
-#endif
+#ifdef __aarch64__
+/* ARM-specific: direct PRFM with optimal policy for each hint level */
+#define _mm_prefetch(p, i) do { \
+    const void *_p = (p); \
+    if ((i) == _MM_HINT_T0) { \
+        __asm__ volatile("prfm pldl1strm, [%0]" :: "r"(_p)); \
+    } else if ((i) == _MM_HINT_T1) { \
+        __asm__ volatile("prfm pldl2keep, [%0]" :: "r"(_p)); \
+    } else if ((i) == _MM_HINT_T2) { \
+        __asm__ volatile("prfm pldl3keep, [%0]" :: "r"(_p)); \
+    } else { \
+        __asm__ volatile("prfm pldl3strm, [%0]" :: "r"(_p)); \
+    } \
+} while(0)
+#else
 #define _mm_prefetch(p, i) __builtin_prefetch((p), 0, (i) == _MM_HINT_T0 ? 3 : ((i) == _MM_HINT_T1 ? 2 : ((i) == _MM_HINT_T2 ? 1 : 0)))
+#endif
 
 /*
  * __rdtsc() replacement for ARM64
