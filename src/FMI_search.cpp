@@ -644,7 +644,10 @@ void FMI_search::getSMEMsOnePosOneThread(uint8_t *enc_qdb,
             for(uint32_t b = 0; b < batchSize; b++)
             {
                 if(!bstate[b].eligible)
+                {
+                    bstate[b].bwd_done = 1;
                     continue;
+                }
                 bstate[b].bwd_j = bstate[b].x - 1;
                 bstate[b].bwd_done = 0;
                 bstate[b].bwd_numPrev = bstate[b].numPrev;
