@@ -185,6 +185,7 @@ private:
                                int64_t *sa_bwt,
                                int64_t *count);
         SMEM backwardExt(SMEM smem, uint8_t a);
+        SMEM backwardExt_single(SMEM smem, uint8_t a);
 };
 
 #endif

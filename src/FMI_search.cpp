@@ -546,7 +546,7 @@ void FMI_search::getSMEMsOnePosOneThread(uint8_t *enc_qdb,
                     // Forward extension is backward extension with the BWT of reverse complement
                     smem_.k = smem.l;
                     smem_.l = smem.k;
-                    SMEM newSmem_ = backwardExt(smem_, 3 - a);
+                    SMEM newSmem_ = backwardExt_single(smem_, 3 - a);
                     //SMEM newSmem_ = forwardExt(smem_, 3 - a);
                     SMEM newSmem = newSmem_;
                     newSmem.k = newSmem_.l;
@@ -607,7 +607,7 @@ void FMI_search::getSMEMsOnePosOneThread(uint8_t *enc_qdb,
                 for(p = 0; p < numPrev; p++)
                 {
                     SMEM smem = prev[p];
-                    SMEM newSmem = backwardExt(smem, a);
+                    SMEM newSmem = backwardExt_single(smem, a);
                     newSmem.m = j;
 
                     if((newSmem.s < min_intv_array[i]) && ((smem.n - smem.m + 1) >= minSeedLen))
@@ -633,7 +633,7 @@ void FMI_search::getSMEMsOnePosOneThread(uint8_t *enc_qdb,
                 {
                     SMEM smem = prev[p];
 
-                    SMEM newSmem = backwardExt(smem, a);
+                    SMEM newSmem = backwardExt_single(smem, a);
                     newSmem.m = j;
 
 
@@ -773,7 +773,7 @@ int64_t FMI_search::bwtSeedStrategyAllPosOneThread(uint8_t *enc_qdb,
                         // Forward extension is backward extension with the BWT of reverse complement
                         smem_.k = smem.l;
                         smem_.l = smem.k;
-                        SMEM newSmem_ = backwardExt(smem_, 3 - a);
+                        SMEM newSmem_ = backwardExt_single(smem_, 3 - a);
                         //SMEM smem = backwardExt(smem, 3 - a);
                         //smem.n = j;
                         SMEM newSmem = newSmem_;
@@ -875,7 +875,7 @@ void FMI_search::getSMEMs(uint8_t *enc_qdb,
                         // Forward extension is backward extension with the BWT of reverse complement
                         smem_.k = smem.l;
                         smem_.l = smem.k;
-                        SMEM newSmem_ = backwardExt(smem_, 3 - a);
+                        SMEM newSmem_ = backwardExt_single(smem_, 3 - a);
                         SMEM newSmem = newSmem_;
                         newSmem.k = newSmem_.l;
                         newSmem.l = newSmem_.k;
@@ -934,7 +934,7 @@ void FMI_search::getSMEMs(uint8_t *enc_qdb,
                     for(p = 0; p < numPrev; p++)
                     {
                         SMEM smem = prev[p];
-                        SMEM newSmem = backwardExt(smem, a);
+                        SMEM newSmem = backwardExt_single(smem, a);
                         newSmem.m = j;
 
                         if(newSmem.s == 0)
@@ -1048,6 +1048,195 @@ SMEM FMI_search::backwardExt(SMEM smem, uint8_t a)
     smem.k = k[a];
     smem.l = l[a];
     smem.s = s[a];
+    return smem;
+}
+
+// 单碱基后向扩展：只计算碱基a及序号>a的occ，减少cp_occ随机访问次数
+// 原始backwardExt: 8次occ访问（4碱基×2端点）
+// backwardExt_single: a=3→2次, a=2→4次, a=1→6次, a=0→8次, 平均5次（省37.5%）
+SMEM FMI_search::backwardExt_single(SMEM smem, uint8_t a)
+{
+    int64_t sp = (int64_t)(smem.k);
+    int64_t ep = (int64_t)(smem.k) + (int64_t)(smem.s);
+
+    // 计算目标碱基a的k和s
+    int64_t occ_sp_a, occ_ep_a;
+    {
+        int64_t occ_id = sp >> CP_SHIFT;
+        int64_t y = sp & CP_MASK;
+        occ_sp_a = cp_occ[occ_id].cp_count[a];
+        uint64_t one_hot = cp_occ[occ_id].one_hot_bwt_str[a];
+        uint64_t mask = one_hot & one_hot_mask_array[y];
+        occ_sp_a += popcount64(mask);
+    }
+    {
+        int64_t occ_id = ep >> CP_SHIFT;
+        int64_t y = ep & CP_MASK;
+        occ_ep_a = cp_occ[occ_id].cp_count[a];
+        uint64_t one_hot = cp_occ[occ_id].one_hot_bwt_str[a];
+        uint64_t mask = one_hot & one_hot_mask_array[y];
+        occ_ep_a += popcount64(mask);
+    }
+    int64_t k_a = count[a] + occ_sp_a;
+    int64_t s_a = occ_ep_a - occ_sp_a;
+
+    // 计算l[a] = smem.l + sentinel_offset + sum(s[b], b > a)
+    int64_t sentinel_offset = 0;
+    if((smem.k <= sentinel_index) && ((smem.k + smem.s) > sentinel_index)) sentinel_offset = 1;
+
+    int64_t l_a;
+    switch(a)
+    {
+        case 3:
+            l_a = smem.l + sentinel_offset;
+            break;
+        case 2:
+        {
+            // 需要s[3]
+            int64_t s3;
+            {
+                int64_t occ_sp_b, occ_ep_b;
+                {
+                    int64_t occ_id = sp >> CP_SHIFT;
+                    int64_t y = sp & CP_MASK;
+                    occ_sp_b = cp_occ[occ_id].cp_count[3];
+                    uint64_t one_hot = cp_occ[occ_id].one_hot_bwt_str[3];
+                    uint64_t mask = one_hot & one_hot_mask_array[y];
+                    occ_sp_b += popcount64(mask);
+                }
+                {
+                    int64_t occ_id = ep >> CP_SHIFT;
+                    int64_t y = ep & CP_MASK;
+                    occ_ep_b = cp_occ[occ_id].cp_count[3];
+                    uint64_t one_hot = cp_occ[occ_id].one_hot_bwt_str[3];
+                    uint64_t mask = one_hot & one_hot_mask_array[y];
+                    occ_ep_b += popcount64(mask);
+                }
+                s3 = occ_ep_b - occ_sp_b;
+            }
+            l_a = smem.l + sentinel_offset + s3;
+            break;
+        }
+        case 1:
+        {
+            // 需要s[3]和s[2]
+            int64_t s3, s2;
+            {
+                int64_t occ_sp_b, occ_ep_b;
+                {
+                    int64_t occ_id = sp >> CP_SHIFT;
+                    int64_t y = sp & CP_MASK;
+                    occ_sp_b = cp_occ[occ_id].cp_count[3];
+                    uint64_t one_hot = cp_occ[occ_id].one_hot_bwt_str[3];
+                    uint64_t mask = one_hot & one_hot_mask_array[y];
+                    occ_sp_b += popcount64(mask);
+                }
+                {
+                    int64_t occ_id = ep >> CP_SHIFT;
+                    int64_t y = ep & CP_MASK;
+                    occ_ep_b = cp_occ[occ_id].cp_count[3];
+                    uint64_t one_hot = cp_occ[occ_id].one_hot_bwt_str[3];
+                    uint64_t mask = one_hot & one_hot_mask_array[y];
+                    occ_ep_b += popcount64(mask);
+                }
+                s3 = occ_ep_b - occ_sp_b;
+            }
+            {
+                int64_t occ_sp_b, occ_ep_b;
+                {
+                    int64_t occ_id = sp >> CP_SHIFT;
+                    int64_t y = sp & CP_MASK;
+                    occ_sp_b = cp_occ[occ_id].cp_count[2];
+                    uint64_t one_hot = cp_occ[occ_id].one_hot_bwt_str[2];
+                    uint64_t mask = one_hot & one_hot_mask_array[y];
+                    occ_sp_b += popcount64(mask);
+                }
+                {
+                    int64_t occ_id = ep >> CP_SHIFT;
+                    int64_t y = ep & CP_MASK;
+                    occ_ep_b = cp_occ[occ_id].cp_count[2];
+                    uint64_t one_hot = cp_occ[occ_id].one_hot_bwt_str[2];
+                    uint64_t mask = one_hot & one_hot_mask_array[y];
+                    occ_ep_b += popcount64(mask);
+                }
+                s2 = occ_ep_b - occ_sp_b;
+            }
+            l_a = smem.l + sentinel_offset + s3 + s2;
+            break;
+        }
+        case 0:
+        default:
+        {
+            // 需要s[3], s[2], s[1] — 退化为原始逻辑
+            int64_t s3, s2, s1;
+            {
+                int64_t occ_sp_b, occ_ep_b;
+                {
+                    int64_t occ_id = sp >> CP_SHIFT;
+                    int64_t y = sp & CP_MASK;
+                    occ_sp_b = cp_occ[occ_id].cp_count[3];
+                    uint64_t one_hot = cp_occ[occ_id].one_hot_bwt_str[3];
+                    uint64_t mask = one_hot & one_hot_mask_array[y];
+                    occ_sp_b += popcount64(mask);
+                }
+                {
+                    int64_t occ_id = ep >> CP_SHIFT;
+                    int64_t y = ep & CP_MASK;
+                    occ_ep_b = cp_occ[occ_id].cp_count[3];
+                    uint64_t one_hot = cp_occ[occ_id].one_hot_bwt_str[3];
+                    uint64_t mask = one_hot & one_hot_mask_array[y];
+                    occ_ep_b += popcount64(mask);
+                }
+                s3 = occ_ep_b - occ_sp_b;
+            }
+            {
+                int64_t occ_sp_b, occ_ep_b;
+                {
+                    int64_t occ_id = sp >> CP_SHIFT;
+                    int64_t y = sp & CP_MASK;
+                    occ_sp_b = cp_occ[occ_id].cp_count[2];
+                    uint64_t one_hot = cp_occ[occ_id].one_hot_bwt_str[2];
+                    uint64_t mask = one_hot & one_hot_mask_array[y];
+                    occ_sp_b += popcount64(mask);
+                }
+                {
+                    int64_t occ_id = ep >> CP_SHIFT;
+                    int64_t y = ep & CP_MASK;
+                    occ_ep_b = cp_occ[occ_id].cp_count[2];
+                    uint64_t one_hot = cp_occ[occ_id].one_hot_bwt_str[2];
+                    uint64_t mask = one_hot & one_hot_mask_array[y];
+                    occ_ep_b += popcount64(mask);
+                }
+                s2 = occ_ep_b - occ_sp_b;
+            }
+            {
+                int64_t occ_sp_b, occ_ep_b;
+                {
+                    int64_t occ_id = sp >> CP_SHIFT;
+                    int64_t y = sp & CP_MASK;
+                    occ_sp_b = cp_occ[occ_id].cp_count[1];
+                    uint64_t one_hot = cp_occ[occ_id].one_hot_bwt_str[1];
+                    uint64_t mask = one_hot & one_hot_mask_array[y];
+                    occ_sp_b += popcount64(mask);
+                }
+                {
+                    int64_t occ_id = ep >> CP_SHIFT;
+                    int64_t y = ep & CP_MASK;
+                    occ_ep_b = cp_occ[occ_id].cp_count[1];
+                    uint64_t one_hot = cp_occ[occ_id].one_hot_bwt_str[1];
+                    uint64_t mask = one_hot & one_hot_mask_array[y];
+                    occ_ep_b += popcount64(mask);
+                }
+                s1 = occ_ep_b - occ_sp_b;
+            }
+            l_a = smem.l + sentinel_offset + s3 + s2 + s1;
+            break;
+        }
+    }
+
+    smem.k = k_a;
+    smem.l = l_a;
+    smem.s = s_a;
     return smem;
 }
 
