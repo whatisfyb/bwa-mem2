@@ -493,6 +493,54 @@ void FMI_search::load_index()
     fprintf(stderr, "* Done reading Index!!\n");
 }
 
+/*
+ * Cross-SMEM interleaved state machine for ARM Kunpeng 920.
+ *
+ * Original: each read is processed to completion before the next read.
+ * New: BATCH=8 reads are interleaved — during the backward extension phase,
+ * all reads' cp_occ prefetches are issued in a batch (PRFM PLDL2KEEP on ARM),
+ * then all reads execute one backward step. This creates memory-level
+ * parallelism (MLP) across reads, hiding DRAM latency (~90-120 cycles on
+ * Kunpeng 920) behind other reads' computation.
+ *
+ * Forward extension remains per-read (already well-handled by loop-inversion
+ * batch=8 in a separate optimization). The state machine focuses on
+ * interleaving the backward extension phase across reads.
+ */
+#define CROSS_SMEM_BATCH 8
+
+/* Per-read state for the interleaved state machine */
+struct ReadState {
+    int32_t rid;
+    int32_t read_idx;       /* index into the caller's arrays */
+    int32_t offset;         /* query_cum_len_ar[rid] */
+    int32_t readlength;
+    int32_t min_intv;
+
+    enum Phase { FWD, BWD, DONE } phase;
+
+    /* Forward extension state */
+    SMEM fwd_smem;
+    int    fwd_j;
+    int    next_x;
+
+    /* Backward extension state */
+    int    numPrev;
+    int    bwd_j;
+
+    bool   active;
+};
+
+/* Portable prefetch helper — PRFM on ARM, _mm_prefetch on x86 */
+static inline void prefetch_cpocc(const CP_OCC *ptr)
+{
+#ifdef __aarch64__
+    __asm__ volatile("prfm pldl2keep, [%0]" :: "r"(ptr));
+#else
+    _mm_prefetch((const char *)ptr, _MM_HINT_T0);
+#endif
+}
+
 void FMI_search::getSMEMsOnePosOneThread(uint8_t *enc_qdb,
                                          int16_t *query_pos_array,
                                          int32_t *min_intv_array,
@@ -501,171 +549,270 @@ void FMI_search::getSMEMsOnePosOneThread(uint8_t *enc_qdb,
                                          int32_t batch_size,
                                          const bseq1_t *seq_,
                                          int32_t *query_cum_len_ar,
-                                         int32_t max_readlength,
+                                         int32_t  max_readlength,
                                          int32_t minSeedLen,
                                          SMEM *matchArray,
                                          int64_t *__numTotalSmem)
 {
     int64_t numTotalSmem = *__numTotalSmem;
-    SMEM prevArray[max_readlength];
 
-    uint32_t i;
-    // Perform SMEM for original reads
-    for(i = 0; i < numReads; i++)
+    /* Allocate prevArray pool — each of CROSS_SMEM_BATCH reads gets its own
+     * slice of max_readlength SMEM entries.  Using _mm_malloc instead of VLA
+     * because VLAs of ~12 KB × 8 would blow the stack. */
+    SMEM *prevPool = (SMEM *)_mm_malloc(
+        (size_t)CROSS_SMEM_BATCH * max_readlength * sizeof(SMEM), 64);
+
+    /* Process reads in batches of CROSS_SMEM_BATCH */
+    for (int32_t batch_start = 0; batch_start < numReads;
+         batch_start += CROSS_SMEM_BATCH)
     {
-        int x = query_pos_array[i];
-        int32_t rid = rid_array[i];
-        int next_x = x + 1;
+        int32_t bcnt = (numReads - batch_start < CROSS_SMEM_BATCH) ?
+                        (numReads - batch_start) : CROSS_SMEM_BATCH;
 
-        int readlength = seq_[rid].l_seq;
-        int offset = query_cum_len_ar[rid];
-        // uint8_t a = enc_qdb[rid * readlength + x];
-        uint8_t a = enc_qdb[offset + x];
+        ReadState st[CROSS_SMEM_BATCH];
 
-        if(a < 4)
+        /* ---- Phase 1: Initialize all reads in the batch ---- */
+        for (int32_t b = 0; b < bcnt; b++)
         {
-            SMEM smem;
-            smem.rid = rid;
-            smem.m = x;
-            smem.n = x;
-            smem.k = count[a];
-            smem.l = count[3 - a];
-            smem.s = count[a+1] - count[a];
-            int numPrev = 0;
-            
-            int j;
-            for(j = x + 1; j < readlength; j++)
+            int32_t i = batch_start + b;
+            ReadState &s = st[b];
+            s.read_idx   = i;
+            s.rid        = rid_array[i];
+            s.readlength = seq_[s.rid].l_seq;
+            s.offset     = query_cum_len_ar[s.rid];
+            s.min_intv   = min_intv_array[i];
+            s.next_x     = query_pos_array[i] + 1;
+            s.active     = true;
+            s.numPrev    = 0;
+
+            SMEM *myPrev = prevPool + (size_t)b * max_readlength;
+
+            int x = query_pos_array[i];
+            uint8_t a = enc_qdb[s.offset + x];
+
+            if (a < 4)
             {
-                // a = enc_qdb[rid * readlength + j];
-                a = enc_qdb[offset + j];
-                next_x = j + 1;
-                if(a < 4)
-                {
-                    SMEM smem_ = smem;
-
-                    // Forward extension is backward extension with the BWT of reverse complement
-                    smem_.k = smem.l;
-                    smem_.l = smem.k;
-                    SMEM newSmem_ = backwardExt(smem_, 3 - a);
-                    //SMEM newSmem_ = forwardExt(smem_, 3 - a);
-                    SMEM newSmem = newSmem_;
-                    newSmem.k = newSmem_.l;
-                    newSmem.l = newSmem_.k;
-                    newSmem.n = j;
-
-                    int32_t s_neq_mask = newSmem.s != smem.s;
-
-                    prevArray[numPrev] = smem;
-                    numPrev += s_neq_mask;
-                    if(newSmem.s < min_intv_array[i])
-                    {
-                        next_x = j;
-                        break;
-                    }
-                    smem = newSmem;
-#ifdef ENABLE_PREFETCH
-                    _mm_prefetch((const char *)(&cp_occ[(smem.k) >> CP_SHIFT]), _MM_HINT_T0);
-                    _mm_prefetch((const char *)(&cp_occ[(smem.l) >> CP_SHIFT]), _MM_HINT_T0);
-#endif
-                }
-                else
-                {
-                    break;
-                }
+                s.fwd_smem.rid = s.rid;
+                s.fwd_smem.m   = x;
+                s.fwd_smem.n   = x;
+                s.fwd_smem.k   = count[a];
+                s.fwd_smem.l   = count[3 - a];
+                s.fwd_smem.s   = count[a+1] - count[a];
+                s.fwd_j        = x + 1;
+                s.phase        = ReadState::FWD;
             }
-            if(smem.s >= min_intv_array[i])
+            else
             {
-
-                prevArray[numPrev] = smem;
-                numPrev++;
-            }
-
-            SMEM *prev;
-            prev = prevArray;
-
-            int p;
-            for(p = 0; p < (numPrev/2); p++)
-            {
-                SMEM temp = prev[p];
-                prev[p] = prev[numPrev - p - 1];
-                prev[numPrev - p - 1] = temp;
-            }
-
-            // Backward search
-            int cur_j = readlength;
-            for(j = x - 1; j >= 0; j--)
-            {
-                int numCurr = 0;
-                int curr_s = -1;
-                // a = enc_qdb[rid * readlength + j];
-                a = enc_qdb[offset + j];
-
-                if(a > 3)
-                {
-                    break;
-                }
-                for(p = 0; p < numPrev; p++)
-                {
-                    SMEM smem = prev[p];
-                    SMEM newSmem = backwardExt(smem, a);
-                    newSmem.m = j;
-
-                    if((newSmem.s < min_intv_array[i]) && ((smem.n - smem.m + 1) >= minSeedLen))
-                    {
-                        cur_j = j;
-
-                        matchArray[numTotalSmem++] = smem;
-                        break;
-                    }
-                    if((newSmem.s >= min_intv_array[i]) && (newSmem.s != curr_s))
-                    {
-                        curr_s = newSmem.s;
-                        prev[numCurr++] = newSmem;
-#ifdef ENABLE_PREFETCH
-                        _mm_prefetch((const char *)(&cp_occ[(newSmem.k) >> CP_SHIFT]), _MM_HINT_T0);
-                        _mm_prefetch((const char *)(&cp_occ[(newSmem.k + newSmem.s) >> CP_SHIFT]), _MM_HINT_T0);
-#endif
-                        break;
-                    }
-                }
-                p++;
-                for(; p < numPrev; p++)
-                {
-                    SMEM smem = prev[p];
-
-                    SMEM newSmem = backwardExt(smem, a);
-                    newSmem.m = j;
-
-
-                    if((newSmem.s >= min_intv_array[i]) && (newSmem.s != curr_s))
-                    {
-                        curr_s = newSmem.s;
-                        prev[numCurr++] = newSmem;
-#ifdef ENABLE_PREFETCH
-                        _mm_prefetch((const char *)(&cp_occ[(newSmem.k) >> CP_SHIFT]), _MM_HINT_T0);
-                        _mm_prefetch((const char *)(&cp_occ[(newSmem.k + newSmem.s) >> CP_SHIFT]), _MM_HINT_T0);
-#endif
-                    }
-                }
-                numPrev = numCurr;
-                if(numCurr == 0)
-                {
-                    break;
-                }
-            }
-            if(numPrev != 0)
-            {
-                SMEM smem = prev[0];
-                if(((smem.n - smem.m + 1) >= minSeedLen))
-                {
-
-                    matchArray[numTotalSmem++] = smem;
-                }
-                numPrev = 0;
+                s.phase = ReadState::DONE;
+                s.active = false;
             }
         }
-        query_pos_array[i] = next_x;
+
+        /* ---- Phase 2: Interleaved execution loop ---- */
+        bool any_active = true;
+        while (any_active)
+        {
+            any_active = false;
+
+            /* Pass A: Batch PRFM prefetch for all reads in BACKWARD phase.
+             * This is the key MLP source — while read 0's cp_occ is being
+             * fetched from DRAM, we also issue fetches for reads 1-7, so
+             * multiple DRAM requests are in-flight simultaneously. */
+            for (int32_t b = 0; b < bcnt; b++)
+            {
+                if (!st[b].active || st[b].phase != ReadState::BWD) continue;
+                SMEM *myPrev = prevPool + (size_t)b * max_readlength;
+                for (int p = 0; p < st[b].numPrev; p++)
+                {
+                    prefetch_cpocc(&cp_occ[myPrev[p].k >> CP_SHIFT]);
+                    prefetch_cpocc(&cp_occ[(myPrev[p].k + myPrev[p].s) >> CP_SHIFT]);
+                }
+            }
+
+            /* Pass B: Compute — one step per active read */
+            for (int32_t b = 0; b < bcnt; b++)
+            {
+                if (!st[b].active) continue;
+                any_active = true;
+
+                ReadState &s  = st[b];
+                SMEM *myPrev  = prevPool + (size_t)b * max_readlength;
+
+                /* ========== FORWARD EXTENSION ========== */
+                if (s.phase == ReadState::FWD)
+                {
+                    if (s.fwd_j < s.readlength)
+                    {
+                        uint8_t a = enc_qdb[s.offset + s.fwd_j];
+                        s.next_x = s.fwd_j + 1;
+
+                        if (a < 4)
+                        {
+                            SMEM smem_ = s.fwd_smem;
+                            smem_.k = s.fwd_smem.l;
+                            smem_.l = s.fwd_smem.k;
+                            SMEM newSmem_ = backwardExt(smem_, 3 - a);
+                            SMEM newSmem = newSmem_;
+                            newSmem.k = newSmem_.l;
+                            newSmem.l = newSmem_.k;
+                            newSmem.n = s.fwd_j;
+
+                            int32_t s_neq_mask = newSmem.s != s.fwd_smem.s;
+                            myPrev[s.numPrev] = s.fwd_smem;
+                            s.numPrev += s_neq_mask;
+
+                            if (newSmem.s < s.min_intv)
+                            {
+                                s.next_x = s.fwd_j;
+                                /* forward done — fall through to transition */
+                                goto fwd_done;
+                            }
+                            s.fwd_smem = newSmem;
+#ifdef ENABLE_PREFETCH
+                            _mm_prefetch((const char *)(&cp_occ[(s.fwd_smem.k) >> CP_SHIFT]), _MM_HINT_T0);
+                            _mm_prefetch((const char *)(&cp_occ[(s.fwd_smem.l) >> CP_SHIFT]), _MM_HINT_T0);
+#endif
+                            s.fwd_j++;
+                        }
+                        else
+                        {
+                            /* N character — forward done */
+                            goto fwd_done;
+                        }
+                    }
+                    else
+                    {
+fwd_done:
+                        /* Forward extension complete — save final SMEM */
+                        if (s.fwd_smem.s >= s.min_intv)
+                        {
+                            myPrev[s.numPrev] = s.fwd_smem;
+                            s.numPrev++;
+                        }
+
+                        /* Reverse prevArray */
+                        for (int p = 0; p < (s.numPrev / 2); p++)
+                        {
+                            SMEM tmp = myPrev[p];
+                            myPrev[p] = myPrev[s.numPrev - p - 1];
+                            myPrev[s.numPrev - p - 1] = tmp;
+                        }
+
+                        /* Transition to backward phase */
+                        s.bwd_j = query_pos_array[s.read_idx] - 1;
+                        s.phase = ReadState::BWD;
+
+                        if (s.numPrev == 0 || s.bwd_j < 0)
+                        {
+                            if (s.numPrev != 0 &&
+                                (myPrev[0].n - myPrev[0].m + 1) >= minSeedLen)
+                            {
+                                matchArray[numTotalSmem++] = myPrev[0];
+                            }
+                            s.active = false;
+                            s.phase  = ReadState::DONE;
+                        }
+                    }
+                }
+                /* ========== BACKWARD EXTENSION ========== */
+                else if (s.phase == ReadState::BWD)
+                {
+                    uint8_t a = enc_qdb[s.offset + s.bwd_j];
+
+                    if (a > 3)
+                    {
+                        /* N character — backward done */
+                        if (s.numPrev != 0 &&
+                            (myPrev[0].n - myPrev[0].m + 1) >= minSeedLen)
+                        {
+                            matchArray[numTotalSmem++] = myPrev[0];
+                        }
+                        s.active = false;
+                        s.phase  = ReadState::DONE;
+                        continue;
+                    }
+
+                    int numCurr = 0;
+                    int curr_s  = -1;
+                    int p;
+
+                    /* First pass: find first surviving SMEM (may break early) */
+                    for (p = 0; p < s.numPrev; p++)
+                    {
+                        SMEM smem    = myPrev[p];
+                        SMEM newSmem = backwardExt(smem, a);
+                        newSmem.m    = s.bwd_j;
+
+                        if ((newSmem.s < s.min_intv) &&
+                            ((smem.n - smem.m + 1) >= minSeedLen))
+                        {
+                            matchArray[numTotalSmem++] = smem;
+                            break;
+                        }
+                        if ((newSmem.s >= s.min_intv) && (newSmem.s != curr_s))
+                        {
+                            curr_s = newSmem.s;
+                            myPrev[numCurr++] = newSmem;
+#ifdef ENABLE_PREFETCH
+                            _mm_prefetch((const char *)(&cp_occ[(newSmem.k) >> CP_SHIFT]), _MM_HINT_T0);
+                            _mm_prefetch((const char *)(&cp_occ[(newSmem.k + newSmem.s) >> CP_SHIFT]), _MM_HINT_T0);
+#endif
+                            break;
+                        }
+                    }
+                    p++;
+                    /* Second pass: remaining prev SMEMs */
+                    for (; p < s.numPrev; p++)
+                    {
+                        SMEM smem    = myPrev[p];
+                        SMEM newSmem = backwardExt(smem, a);
+                        newSmem.m    = s.bwd_j;
+
+                        if ((newSmem.s >= s.min_intv) && (newSmem.s != curr_s))
+                        {
+                            curr_s = newSmem.s;
+                            myPrev[numCurr++] = newSmem;
+#ifdef ENABLE_PREFETCH
+                            _mm_prefetch((const char *)(&cp_occ[(newSmem.k) >> CP_SHIFT]), _MM_HINT_T0);
+                            _mm_prefetch((const char *)(&cp_occ[(newSmem.k + newSmem.s) >> CP_SHIFT]), _MM_HINT_T0);
+#endif
+                        }
+                    }
+
+                    s.numPrev = numCurr;
+
+                    if (numCurr == 0)
+                    {
+                        /* No surviving SMEMs — backward done (no output) */
+                        s.active = false;
+                        s.phase  = ReadState::DONE;
+                    }
+                    else
+                    {
+                        s.bwd_j--;
+                        if (s.bwd_j < 0)
+                        {
+                            /* Reached start of read */
+                            if ((myPrev[0].n - myPrev[0].m + 1) >= minSeedLen)
+                            {
+                                matchArray[numTotalSmem++] = myPrev[0];
+                            }
+                            s.active = false;
+                            s.phase  = ReadState::DONE;
+                        }
+                    }
+                }
+            }
+        }
+
+        /* ---- Phase 3: Collect next_x values ---- */
+        for (int32_t b = 0; b < bcnt; b++)
+        {
+            query_pos_array[batch_start + b] = st[b].next_x;
+        }
     }
+
+    _mm_free(prevPool);
     (*__numTotalSmem) = numTotalSmem;
 }
 
