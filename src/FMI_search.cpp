@@ -53,6 +53,10 @@ FMI_search::FMI_search(const char *fname)
     sa_ms_byte = NULL;
     cp_occ = NULL;
     one_hot_mask_array = NULL;
+    kmer_table_k = NULL;
+    kmer_table_l = NULL;
+    kmer_table_s = NULL;
+    kmer_table_built = false;
 }
 
 FMI_search::~FMI_search()
@@ -65,6 +69,12 @@ FMI_search::~FMI_search()
         _mm_free(cp_occ);
     if(one_hot_mask_array)
         _mm_free(one_hot_mask_array);
+    if(kmer_table_k)
+        _mm_free(kmer_table_k);
+    if(kmer_table_l)
+        _mm_free(kmer_table_l);
+    if(kmer_table_s)
+        _mm_free(kmer_table_s);
 }
 
 int64_t FMI_search::pac_seq_len(const char *fn_pac)
@@ -491,6 +501,9 @@ void FMI_search::load_index()
     bwa_idx_load_ele(ref_file_name, BWA_IDX_ALL);
 
     fprintf(stderr, "* Done reading Index!!\n");
+
+    /* Build k-mer lookup table after index is fully loaded */
+    build_kmer_table();
 }
 
 void FMI_search::getSMEMsOnePosOneThread(uint8_t *enc_qdb,
@@ -536,6 +549,37 @@ void FMI_search::getSMEMsOnePosOneThread(uint8_t *enc_qdb,
             int j;
             for(j = x + 1; j < readlength; j++)
             {
+                /* k-mer lookup fast path: if still at the root (numPrev == 0)
+                 * and have K consecutive valid bases starting at x, jump ahead.
+                 * Only safe when the interval didn't shrink during the K steps
+                 * (otherwise we'd miss intermediate SMEMs that should go into prevArray). */
+                if (kmer_table_built && numPrev == 0 &&
+                    (x + KMER_K) <= readlength)
+                {
+                    int kmer_code = kmer_encode(enc_qdb + offset + x, KMER_K);
+                    /* Safe to jump only if final interval == initial interval
+                     * (meaning no interval shrinkage occurred in the K steps) */
+                    int64_t initial_s = count[enc_qdb[offset + x] + 1] - count[enc_qdb[offset + x]];
+                    if (kmer_code >= 0 && kmer_table_s[kmer_code] > 0 &&
+                        kmer_table_s[kmer_code] == initial_s &&
+                        kmer_table_s[kmer_code] >= min_intv_array[i])
+                    {
+                        smem.rid = rid;
+                        smem.m = x;
+                        smem.n = x + KMER_K - 1;
+                        smem.k = kmer_table_k[kmer_code];
+                        smem.l = kmer_table_l[kmer_code];
+                        smem.s = kmer_table_s[kmer_code];
+                        j = x + KMER_K;
+                        next_x = j;
+#ifdef ENABLE_PREFETCH
+                        _mm_prefetch((const char *)(&cp_occ[(smem.k) >> CP_SHIFT]), _MM_HINT_T0);
+                        _mm_prefetch((const char *)(&cp_occ[(smem.l) >> CP_SHIFT]), _MM_HINT_T0);
+#endif
+                        break;  /* exit the forward loop after k-mer jump */
+                    }
+                }
+
                 // a = enc_qdb[rid * readlength + j];
                 a = enc_qdb[offset + j];
                 next_x = j + 1;
@@ -1021,6 +1065,113 @@ void FMI_search::sortSMEMs(SMEM *matchArray,
     }
 }
 
+
+/*
+ * k-mer lookup table: precompute the result of K consecutive forward extension
+ * steps starting from the BWT root (full interval), for all 4^K possible k-mers.
+ *
+ * In forward extension (getSMEMsOnePosOneThread), the first step starts from
+ * the BWT root: smem.k = count[a], smem.s = count[a+1] - count[a].
+ * The next K-1 steps are sequential backwardExt calls (with k/l swap).
+ * By precomputing all 4^K results including l, we can skip K steps of
+ * backwardExt calls (each with 8 cp_occ lookups = 8 DRAM misses) and replace
+ * them with a single table lookup.
+ *
+ * k=10: 4^10 × 24B = ~25 MB. k=12 would be 4^12 × 24B = ~384 MB (too large).
+ */
+
+int FMI_search::kmer_encode(const uint8_t *enc, int len)
+{
+    if (len < KMER_K) return -1;
+    int code = 0;
+    for (int i = 0; i < KMER_K; i++)
+    {
+        if (enc[i] >= 4) return -1;
+        code = (code << 2) | enc[i];
+    }
+    return code;
+}
+
+void FMI_search::build_kmer_table()
+{
+    fprintf(stderr, "* Building k-mer lookup table (k=%d, %d entries, ~%.0f MB)...\n",
+            KMER_K, KMER_TABLE_SIZE,
+            (double)KMER_TABLE_SIZE * 24 / (1024.0 * 1024.0));
+
+    kmer_table_k = (int64_t *)_mm_malloc((size_t)KMER_TABLE_SIZE * sizeof(int64_t), 64);
+    kmer_table_l = (int64_t *)_mm_malloc((size_t)KMER_TABLE_SIZE * sizeof(int64_t), 64);
+    kmer_table_s = (int64_t *)_mm_malloc((size_t)KMER_TABLE_SIZE * sizeof(int64_t), 64);
+
+    if (!kmer_table_k || !kmer_table_l || !kmer_table_s)
+    {
+        fprintf(stderr, "WARNING: k-mer table allocation failed. "
+                "Falling back to normal backwardExt.\n");
+        if (kmer_table_k) { _mm_free(kmer_table_k); kmer_table_k = NULL; }
+        if (kmer_table_l) { _mm_free(kmer_table_l); kmer_table_l = NULL; }
+        if (kmer_table_s) { _mm_free(kmer_table_s); kmer_table_s = NULL; }
+        kmer_table_built = false;
+        return;
+    }
+
+    for (int code = 0; code < KMER_TABLE_SIZE; code++)
+    {
+        /* Decode k-mer from code */
+        uint8_t bases[KMER_K];
+        int tmp = code;
+        for (int i = KMER_K - 1; i >= 0; i--)
+        {
+            bases[i] = tmp & 3;
+            tmp >>= 2;
+        }
+
+        /* Initialize root SMEM from first base */
+        uint8_t a0 = bases[0];
+        SMEM smem;
+        smem.rid = 0;
+        smem.m = 0;
+        smem.n = 0;
+        smem.k = count[a0];
+        smem.l = count[3 - a0];
+        smem.s = count[a0 + 1] - count[a0];
+
+        /* Forward extension: K-1 steps via backwardExt on rev-comp BWT */
+        bool valid = true;
+        for (int j = 1; j < KMER_K; j++)
+        {
+            uint8_t a = bases[j];
+
+            /* Forward extension = backwardExt on rev-comp BWT */
+            SMEM smem_ = smem;
+            smem_.k = smem.l;
+            smem_.l = smem.k;
+            SMEM newSmem_ = backwardExt(smem_, 3 - a);
+            SMEM newSmem = newSmem_;
+            newSmem.k = newSmem_.l;
+            newSmem.l = newSmem_.k;
+
+            if (newSmem.s == 0) { valid = false; break; }
+            smem = newSmem;
+        }
+
+        if (valid)
+        {
+            kmer_table_k[code] = smem.k;
+            kmer_table_l[code] = smem.l;
+            kmer_table_s[code] = smem.s;
+        }
+        else
+        {
+            kmer_table_k[code] = -1;  /* sentinel: invalid */
+            kmer_table_l[code] = -1;
+            kmer_table_s[code] = 0;
+        }
+    }
+
+    kmer_table_built = true;
+    fprintf(stderr, "* k-mer lookup table built (%d entries, ~%.0f MB)\n",
+            KMER_TABLE_SIZE,
+            (double)KMER_TABLE_SIZE * 24 / (1024.0 * 1024.0));
+}
 
 SMEM FMI_search::backwardExt(SMEM smem, uint8_t a)
 {

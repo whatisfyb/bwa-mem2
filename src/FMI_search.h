@@ -176,6 +176,21 @@ private:
 
         uint64_t *one_hot_mask_array;
 
+        /* k-mer lookup table for forward extension fast path.
+         * Stores the result of K consecutive forward extension steps starting
+         * from the BWT root (full interval), for all 4^K possible k-mers.
+         * Each entry: { k_new, l_new, s_new } as three packed int64_t.
+         * k=10 → 4^10 = 1,048,576 entries × 24B = ~25 MB */
+#define KMER_K 10
+#define KMER_TABLE_SIZE (1 << (2 * KMER_K))  /* 4^10 = 1M entries */
+        int64_t *kmer_table_k;  /* [KMER_TABLE_SIZE] — resulting k */
+        int64_t *kmer_table_l;  /* [KMER_TABLE_SIZE] — resulting l */
+        int64_t *kmer_table_s;  /* [KMER_TABLE_SIZE] — resulting s */
+        bool kmer_table_built;
+
+        void build_kmer_table();
+        int  kmer_encode(const uint8_t *enc, int len);
+
         int64_t pac_seq_len(const char *fn_pac);
         void pac2nt(const char *fn_pac,
                     std::string &reference_seq);
