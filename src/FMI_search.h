@@ -100,6 +100,9 @@ typedef struct batch_fwd_state
     int32_t min_intv;
     uint32_t matchIdx;
     SMEM *prevArray;
+    int bwd_j;
+    int bwd_done;
+    int bwd_numPrev;
 } BatchFwdState;
 
 class FMI_search: public indexEle

@@ -635,117 +635,164 @@ void FMI_search::getSMEMsOnePosOneThread(uint8_t *enc_qdb,
             }
         }
 
-        // Phase C: 反向扩展 — 逐read处理，逻辑与原始代码完全一致
-        for(uint32_t b = 0; b < batchSize; b++)
+        // Phase C: 反向扩展 — 8路循环翻转，利用前向warm的cp_occ cache
+        // 与前向循环翻转类似：prefetch pass + compute pass
+        // 关键：用_mm_prefetch T0而非PRFM，因为T0只是hint，
+        // cache line已在L2则空操作，不会驱逐前向warm的数据
         {
-            if(!bstate[b].eligible)
+            // 初始化后向扩展状态
+            for(uint32_t b = 0; b < batchSize; b++)
             {
+                if(!bstate[b].eligible)
+                    continue;
+                bstate[b].bwd_j = bstate[b].x - 1;
+                bstate[b].bwd_done = 0;
+                bstate[b].bwd_numPrev = bstate[b].numPrev;
+                if(bstate[b].smem.s >= bstate[b].min_intv)
+                {
+                    bstate[b].prevArray[bstate[b].bwd_numPrev] = bstate[b].smem;
+                    bstate[b].bwd_numPrev++;
+                }
+                // reverse prevArray
+                for(int p = 0; p < (bstate[b].bwd_numPrev / 2); p++)
+                {
+                    SMEM temp = bstate[b].prevArray[p];
+                    bstate[b].prevArray[p] = bstate[b].prevArray[bstate[b].bwd_numPrev - p - 1];
+                    bstate[b].prevArray[bstate[b].bwd_numPrev - p - 1] = temp;
+                }
+                if(bstate[b].bwd_numPrev == 0 || bstate[b].bwd_j < 0)
+                {
+                    if(bstate[b].bwd_numPrev != 0 &&
+                       (bstate[b].prevArray[0].n - bstate[b].prevArray[0].m + 1) >= minSeedLen)
+                        matchArray[numTotalSmem++] = bstate[b].prevArray[0];
+                    bstate[b].bwd_done = 1;
+                }
+            }
+            // fill unused slots
+            for(uint32_t b = batchSize; b < BATCH_FWD_SIZE; b++)
+                bstate[b].bwd_done = 1;
+
+            // 循环翻转后向扩展
+            int numBwdActive = 0;
+            for(uint32_t b = 0; b < BATCH_FWD_SIZE; b++)
+                if(!bstate[b].bwd_done) numBwdActive++;
+
+            while(numBwdActive > 0)
+            {
+                // Prefetch pass: 为所有活跃read预取下一步的cp_occ
+                for(uint32_t b = 0; b < BATCH_FWD_SIZE; b++)
+                {
+                    if(bstate[b].bwd_done) continue;
+                    if(bstate[b].bwd_j < 0) continue;
+                    uint8_t a = enc_qdb[bstate[b].offset + bstate[b].bwd_j];
+                    if(a > 3) continue;
+                    // 预取所有prev SMEM的cp_occ
+                    for(int p = 0; p < bstate[b].bwd_numPrev; p++)
+                    {
+                        _mm_prefetch((const char *)(&cp_occ[(bstate[b].prevArray[p].k) >> CP_SHIFT]), _MM_HINT_T0);
+                        _mm_prefetch((const char *)(&cp_occ[(bstate[b].prevArray[p].k + bstate[b].prevArray[p].s) >> CP_SHIFT]), _MM_HINT_T0);
+                    }
+                }
+
+                // Compute pass: 每个活跃read执行一步后向扩展
+                for(uint32_t b = 0; b < BATCH_FWD_SIZE; b++)
+                {
+                    if(bstate[b].bwd_done) continue;
+
+                    if(bstate[b].bwd_j < 0)
+                    {
+                        bstate[b].bwd_done = 1;
+                        numBwdActive--;
+                        continue;
+                    }
+
+                    uint8_t a = enc_qdb[bstate[b].offset + bstate[b].bwd_j];
+
+                    if(a > 3)
+                    {
+                        if(bstate[b].bwd_numPrev != 0 &&
+                           (bstate[b].prevArray[0].n - bstate[b].prevArray[0].m + 1) >= minSeedLen)
+                            matchArray[numTotalSmem++] = bstate[b].prevArray[0];
+                        bstate[b].bwd_done = 1;
+                        numBwdActive--;
+                        continue;
+                    }
+
+                    int numCurr = 0;
+                    int curr_s = -1;
+                    int p;
+
+                    for(p = 0; p < bstate[b].bwd_numPrev; p++)
+                    {
+                        SMEM smem = bstate[b].prevArray[p];
+                        SMEM newSmem = backwardExt(smem, a);
+                        newSmem.m = bstate[b].bwd_j;
+
+                        if((newSmem.s < bstate[b].min_intv) && ((smem.n - smem.m + 1) >= minSeedLen))
+                        {
+                            matchArray[numTotalSmem++] = smem;
+                            break;
+                        }
+                        if((newSmem.s >= bstate[b].min_intv) && (newSmem.s != curr_s))
+                        {
+                            curr_s = newSmem.s;
+                            bstate[b].prevArray[numCurr++] = newSmem;
+#ifdef ENABLE_PREFETCH
+                            _mm_prefetch((const char *)(&cp_occ[(newSmem.k) >> CP_SHIFT]), _MM_HINT_T0);
+                            _mm_prefetch((const char *)(&cp_occ[(newSmem.k + newSmem.s) >> CP_SHIFT]), _MM_HINT_T0);
+#endif
+                            break;
+                        }
+                    }
+                    p++;
+                    for(; p < bstate[b].bwd_numPrev; p++)
+                    {
+                        SMEM smem = bstate[b].prevArray[p];
+                        SMEM newSmem = backwardExt(smem, a);
+                        newSmem.m = bstate[b].bwd_j;
+
+                        if((newSmem.s >= bstate[b].min_intv) && (newSmem.s != curr_s))
+                        {
+                            curr_s = newSmem.s;
+                            bstate[b].prevArray[numCurr++] = newSmem;
+#ifdef ENABLE_PREFETCH
+                            _mm_prefetch((const char *)(&cp_occ[(newSmem.k) >> CP_SHIFT]), _MM_HINT_T0);
+                            _mm_prefetch((const char *)(&cp_occ[(newSmem.k + newSmem.s) >> CP_SHIFT]), _MM_HINT_T0);
+#endif
+                        }
+                    }
+
+                    bstate[b].bwd_numPrev = numCurr;
+
+                    if(numCurr == 0)
+                    {
+                        bstate[b].bwd_done = 1;
+                        numBwdActive--;
+                    }
+                    else
+                    {
+                        bstate[b].bwd_j--;
+                        if(bstate[b].bwd_j < 0)
+                        {
+                            if((bstate[b].prevArray[0].n - bstate[b].prevArray[0].m + 1) >= minSeedLen)
+                                matchArray[numTotalSmem++] = bstate[b].prevArray[0];
+                            bstate[b].bwd_done = 1;
+                            numBwdActive--;
+                        }
+                    }
+                }
+            }
+
+            // Collect results
+            for(uint32_t b = 0; b < batchSize; b++)
+            {
+                if(!bstate[b].eligible)
+                {
+                    query_pos_array[bstate[b].matchIdx] = bstate[b].next_x;
+                    continue;
+                }
                 query_pos_array[bstate[b].matchIdx] = bstate[b].next_x;
-                continue;
             }
-
-            SMEM smem = bstate[b].smem;
-            int numPrev = bstate[b].numPrev;
-            SMEM *prevArray = bstate[b].prevArray;
-            int32_t rid = bstate[b].rid;
-            int x = bstate[b].x;
-            int offset = bstate[b].offset;
-            int readlength = bstate[b].readlength;
-            int32_t min_intv = bstate[b].min_intv;
-            uint32_t matchIdx = bstate[b].matchIdx;
-
-            if(smem.s >= min_intv)
-            {
-                prevArray[numPrev] = smem;
-                numPrev++;
-            }
-
-            SMEM *prev;
-            prev = prevArray;
-
-            int p;
-            for(p = 0; p < (numPrev/2); p++)
-            {
-                SMEM temp = prev[p];
-                prev[p] = prev[numPrev - p - 1];
-                prev[numPrev - p - 1] = temp;
-            }
-
-            // 反向搜索
-            int cur_j = readlength;
-            int j;
-            uint8_t a;
-            for(j = x - 1; j >= 0; j--)
-            {
-                int numCurr = 0;
-                int curr_s = -1;
-                a = enc_qdb[offset + j];
-
-                if(a > 3)
-                {
-                    break;
-                }
-                for(p = 0; p < numPrev; p++)
-                {
-                    SMEM smem = prev[p];
-                    SMEM newSmem = backwardExt(smem, a);
-                    newSmem.m = j;
-
-                    if((newSmem.s < min_intv) && ((smem.n - smem.m + 1) >= minSeedLen))
-                    {
-                        cur_j = j;
-
-                        matchArray[numTotalSmem++] = smem;
-                        break;
-                    }
-                    if((newSmem.s >= min_intv) && (newSmem.s != curr_s))
-                    {
-                        curr_s = newSmem.s;
-                        prev[numCurr++] = newSmem;
-#ifdef ENABLE_PREFETCH
-                        _mm_prefetch((const char *)(&cp_occ[(newSmem.k) >> CP_SHIFT]), _MM_HINT_T0);
-                        _mm_prefetch((const char *)(&cp_occ[(newSmem.k + newSmem.s) >> CP_SHIFT]), _MM_HINT_T0);
-#endif
-                        break;
-                    }
-                }
-                p++;
-                for(; p < numPrev; p++)
-                {
-                    SMEM smem = prev[p];
-
-                    SMEM newSmem = backwardExt(smem, a);
-                    newSmem.m = j;
-
-
-                    if((newSmem.s >= min_intv) && (newSmem.s != curr_s))
-                    {
-                        curr_s = newSmem.s;
-                        prev[numCurr++] = newSmem;
-#ifdef ENABLE_PREFETCH
-                        _mm_prefetch((const char *)(&cp_occ[(newSmem.k) >> CP_SHIFT]), _MM_HINT_T0);
-                        _mm_prefetch((const char *)(&cp_occ[(newSmem.k + newSmem.s) >> CP_SHIFT]), _MM_HINT_T0);
-#endif
-                    }
-                }
-                numPrev = numCurr;
-                if(numCurr == 0)
-                {
-                    break;
-                }
-            }
-            if(numPrev != 0)
-            {
-                SMEM smem = prev[0];
-                if(((smem.n - smem.m + 1) >= minSeedLen))
-                {
-
-                    matchArray[numTotalSmem++] = smem;
-                }
-                numPrev = 0;
-            }
-
-            query_pos_array[matchIdx] = bstate[b].next_x;
         }
     }
 
