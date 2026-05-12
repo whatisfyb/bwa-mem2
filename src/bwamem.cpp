@@ -2104,6 +2104,19 @@ void mem_chain2aln_across_reads_V2(const mem_opt_t *opt, const bntseq_t *bns,
 
     int spos = 0;
 
+    // SW缓存复用：延迟复制记录
+    // 在seed循环中记录复用关系，SW完成后统一复制
+    struct sw_reuse_entry {
+        int seqid;        // 哪个read
+        int target_idx;   // 目标alnreg在av->a中的索引
+        int source_idx;   // 参考alnreg在av->a中的索引
+        int64_t rshift;   // ref位移偏移
+        int32_t qshift;   // query位移偏移
+    };
+    int sw_reuse_cap = nseq * 4;  // 预分配
+    int sw_reuse_count = 0;
+    sw_reuse_entry *sw_reuse = (sw_reuse_entry *)malloc(sw_reuse_cap * sizeof(sw_reuse_entry));
+
     // uint64_t timUP = __rdtsc();
     for (int l=0; l<nseq; l++)
     {
@@ -2204,19 +2217,18 @@ void mem_chain2aln_across_reads_V2(const mem_opt_t *opt, const bntseq_t *bns,
 
             // SW结果缓存复用：当同一chain内seed的延伸区域高度重叠时，
             // 复用已处理seed的alnreg结果，按位移偏移，避免重复SW计算。
-            // 这不会丢失比对机会，因为重叠区域的SW结果几乎相同。
+            // 延迟复制：seed循环中只标记复用关系，SW计算完成后再统一复制。
             int64_t cache_last_rbeg = -1;
             int32_t cache_last_qbeg = -1;
             int32_t cache_last_len = 0;
             int cache_last_aln_idx = -1;  // 上一个有效seed的alnreg索引
-            int32_t seeds_reused = 0;
 
             // uint64_t tim = __rdtsc();
             for (int k=c->n-1; k >= 0; k--)
             {
                 s = &c->seeds[(uint32_t)srt[k]];
 
-                // 冗余检测：如果当前seed与上一个已处理seed高度重叠，复用alnreg
+                // 冗余检测：如果当前seed与上一个已处理seed高度重叠，标记复用
                 int reuse_sw = 0;
                 if (cache_last_rbeg >= 0 && cache_last_len > 0 && cache_last_aln_idx >= 0) {
                     int64_t rdist = s->rbeg > cache_last_rbeg ? s->rbeg - cache_last_rbeg : cache_last_rbeg - s->rbeg;
@@ -2224,7 +2236,6 @@ void mem_chain2aln_across_reads_V2(const mem_opt_t *opt, const bntseq_t *bns,
                     // 如果ref和query位移都小于seed长度的一半，延伸区域重叠>75%
                     if (rdist < (int64_t)(cache_last_len >> 1) && qdist < (cache_last_len >> 1)) {
                         reuse_sw = 1;
-                        seeds_reused++;
                     }
                 }
 
@@ -2246,36 +2257,21 @@ void mem_chain2aln_across_reads_V2(const mem_opt_t *opt, const bntseq_t *bns,
                 tprof[PE19][tid] ++;
 
                 if (reuse_sw) {
-                    // 复用上一个有效seed的alnreg结果
-                    mem_alnreg_t *prev_a = &av->a[cache_last_aln_idx];
-                    // 计算位移偏移（当前seed相对于上一个seed的位置差）
+                    // 不立即复制，只记录复用关系到全局数组，SW完成后再复制
+                    if (sw_reuse_count >= sw_reuse_cap) {
+                        sw_reuse_cap *= 2;
+                        sw_reuse = (sw_reuse_entry *)realloc(sw_reuse, sw_reuse_cap * sizeof(sw_reuse_entry));
+                    }
                     int64_t rshift = (int64_t)s->rbeg - cache_last_rbeg;
                     int32_t qshift = (int32_t)s->qbeg - cache_last_qbeg;
-                    // 复制score相关字段
-                    a->score = prev_a->score;
-                    a->truesc = prev_a->truesc;
-                    a->w = prev_a->w;
-                    a->sub = prev_a->sub;
-                    a->csub = prev_a->csub;
-                    // 按位移偏移alignment region边界
-                    if (prev_a->rb != H0_) a->rb = prev_a->rb + rshift; else a->rb = H0_;
-                    if (prev_a->qb != H0_) a->qb = prev_a->qb + qshift; else a->qb = H0_;
-                    if (prev_a->re != H0_) a->re = prev_a->re + rshift; else a->re = H0_;
-                    if (prev_a->qe != H0_) a->qe = prev_a->qe + qshift; else a->qe = H0_;
-                    // 重新计算seedcov（因为seed位置变了）
-                    if (a->rb != H0_ && a->qb != H0_ && a->qe != H0_ && a->re != H0_)
-                    {
-                        int i;
-                        for (i = 0, a->seedcov = 0; i < c->n; ++i)
-                        {
-                            const mem_seed_t *t = &c->seeds[i];
-                            if (t->qbeg >= a->qb && t->qbeg + t->len <= a->qe &&
-                                t->rbeg >= a->rb && t->rbeg + t->len <= a->re)
-                                a->seedcov += t->len;
-                        }
-                    }
+                    sw_reuse[sw_reuse_count].seqid = c->seqid;
+                    sw_reuse[sw_reuse_count].target_idx = av->n - 1;
+                    sw_reuse[sw_reuse_count].source_idx = cache_last_aln_idx;
+                    sw_reuse[sw_reuse_count].rshift = rshift;
+                    sw_reuse[sw_reuse_count].qshift = qshift;
+                    sw_reuse_count++;
                     // 不创建SeqPair，不消耗SW计算
-                    // 更新cache信息（不更新，保持上一个有效seed的位置，让后续seed也和同一个比较）
+                    // 不更新cache，让后续seed也和同一个有效seed比较
                     continue;
                 }
 
@@ -2950,6 +2946,42 @@ void mem_chain2aln_across_reads_V2(const mem_opt_t *opt, const bntseq_t *bns,
                 numPairsLeft, numPairsRight, *wsize_pair);
         exit(EXIT_FAILURE);
     }
+
+    // SW缓存复用：延迟复制 - SW计算已完成，现在统一复制alnreg结果
+    for (int r = 0; r < sw_reuse_count; r++) {
+        mem_alnreg_v *av = &av_v[sw_reuse[r].seqid];
+        mem_alnreg_t *target = &av->a[sw_reuse[r].target_idx];
+        mem_alnreg_t *source = &av->a[sw_reuse[r].source_idx];
+        int64_t rshift = sw_reuse[r].rshift;
+        int32_t qshift = sw_reuse[r].qshift;
+        // 复制score相关字段
+        target->score = source->score;
+        target->truesc = source->truesc;
+        target->w = source->w;
+        target->sub = source->sub;
+        target->csub = source->csub;
+        target->sub_n = source->sub_n;
+        target->alt_sc = source->alt_sc;
+        // 按位移偏移alignment region边界
+        if (source->rb != H0_) target->rb = source->rb + rshift; else target->rb = H0_;
+        if (source->qb != H0_) target->qb = source->qb + qshift; else target->qb = H0_;
+        if (source->re != H0_) target->re = source->re + rshift; else target->re = H0_;
+        if (source->qe != H0_) target->qe = source->qe + qshift; else target->qe = H0_;
+        // 重新计算seedcov
+        if (target->rb != H0_ && target->qb != H0_ && target->qe != H0_ && target->re != H0_)
+        {
+            int ii;
+            for (ii = 0, target->seedcov = 0; ii < target->c->n; ++ii)
+            {
+                const mem_seed_t *t = &target->c->seeds[ii];
+                if (t->qbeg >= target->qb && t->qbeg + t->len <= target->qe &&
+                    t->rbeg >= target->rb && t->rbeg + t->len <= target->re)
+                    target->seedcov += t->len;
+            }
+        }
+    }
+    free(sw_reuse);
+
     /* Discard seeds and hence their alignemnts */
 
     lim_g[0] = 0;
