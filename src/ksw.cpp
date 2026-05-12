@@ -121,6 +121,12 @@ kswr_t ksw_u8(kswq_t *q, int tlen, const uint8_t *target,
 	__m128i zero, oe_del, e_del, oe_ins, e_ins, shift, *H0, *H1, *E, *Hmax;
 	kswr_t r;
 
+#if defined(KUNPENG_ARM64) && defined(__aarch64__)
+// ARM64: use NEON vmaxvq_u8 (1 instruction) instead of 9 SSE2 instructions
+#define __max_16(ret, xx) do { \
+		(ret) = vmaxvq_u8((xx).vect_u8); \
+	} while (0)
+#else
 #define __max_16(ret, xx) do { \
 		(xx) = _mm_max_epu8((xx), _mm_srli_si128((xx), 8)); \
 		(xx) = _mm_max_epu8((xx), _mm_srli_si128((xx), 4)); \
@@ -128,6 +134,7 @@ kswr_t ksw_u8(kswq_t *q, int tlen, const uint8_t *target,
 		(xx) = _mm_max_epu8((xx), _mm_srli_si128((xx), 1)); \
     	(ret) = _mm_extract_epi16((xx), 0) & 0x00ff; \
 	} while (0)
+#endif
 
 	// initialization
 	r = g_defr;
@@ -188,8 +195,17 @@ kswr_t ksw_u8(kswq_t *q, int tlen, const uint8_t *target,
 				_mm_store_si128(H1 + j, h);
 				h = _mm_subs_epu8(h, oe_ins);
 				f = _mm_subs_epu8(f, e_ins);
+#if defined(KUNPENG_ARM64) && defined(__aarch64__)
+				// ARM64: NEON vmaxvq_u8 replaces movemask+cmpeq+subs (3 instrs -> 1 instr)
+				{
+					__m128i diff = _mm_subs_epu8(f, h);
+					uint8_t m = vmaxvq_u8(diff.vect_u8);
+					if (UNLIKELY(m == 0)) goto end_loop16;
+				}
+#else
 				cmp = _mm_movemask_epi8(_mm_cmpeq_epi8(_mm_subs_epu8(f, h), zero));
 				if (UNLIKELY(cmp == 0xffff)) goto end_loop16;
+#endif
 			}
 		}
 end_loop16:
