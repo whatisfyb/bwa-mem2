@@ -2202,10 +2202,31 @@ void mem_chain2aln_across_reads_V2(const mem_opt_t *opt, const bntseq_t *bns,
 
             lim_g[l+1] += c->n;
 
+            // SW结果缓存复用：当同一chain内seed的延伸区域高度重叠时，
+            // 复用已处理seed的alnreg结果，按位移偏移，避免重复SW计算。
+            // 这不会丢失比对机会，因为重叠区域的SW结果几乎相同。
+            int64_t cache_last_rbeg = -1;
+            int32_t cache_last_qbeg = -1;
+            int32_t cache_last_len = 0;
+            int cache_last_aln_idx = -1;  // 上一个有效seed的alnreg索引
+            int32_t seeds_reused = 0;
+
             // uint64_t tim = __rdtsc();
             for (int k=c->n-1; k >= 0; k--)
             {
                 s = &c->seeds[(uint32_t)srt[k]];
+
+                // 冗余检测：如果当前seed与上一个已处理seed高度重叠，复用alnreg
+                int reuse_sw = 0;
+                if (cache_last_rbeg >= 0 && cache_last_len > 0 && cache_last_aln_idx >= 0) {
+                    int64_t rdist = s->rbeg > cache_last_rbeg ? s->rbeg - cache_last_rbeg : cache_last_rbeg - s->rbeg;
+                    int32_t qdist = s->qbeg > cache_last_qbeg ? s->qbeg - cache_last_qbeg : cache_last_qbeg - s->qbeg;
+                    // 如果ref和query位移都小于seed长度的一半，延伸区域重叠>75%
+                    if (rdist < (int64_t)(cache_last_len >> 1) && qdist < (cache_last_len >> 1)) {
+                        reuse_sw = 1;
+                        seeds_reused++;
+                    }
+                }
 
                 mem_alnreg_t *a;
                 // a = kv_pushp(mem_alnreg_t, *av);
@@ -2223,6 +2244,40 @@ void mem_chain2aln_across_reads_V2(const mem_opt_t *opt, const bntseq_t *bns,
                 a->rb = a->qb = a->re = a->qe = H0_;
 
                 tprof[PE19][tid] ++;
+
+                if (reuse_sw) {
+                    // 复用上一个有效seed的alnreg结果
+                    mem_alnreg_t *prev_a = &av->a[cache_last_aln_idx];
+                    // 计算位移偏移（当前seed相对于上一个seed的位置差）
+                    int64_t rshift = (int64_t)s->rbeg - cache_last_rbeg;
+                    int32_t qshift = (int32_t)s->qbeg - cache_last_qbeg;
+                    // 复制score相关字段
+                    a->score = prev_a->score;
+                    a->truesc = prev_a->truesc;
+                    a->w = prev_a->w;
+                    a->sub = prev_a->sub;
+                    a->csub = prev_a->csub;
+                    // 按位移偏移alignment region边界
+                    if (prev_a->rb != H0_) a->rb = prev_a->rb + rshift; else a->rb = H0_;
+                    if (prev_a->qb != H0_) a->qb = prev_a->qb + qshift; else a->qb = H0_;
+                    if (prev_a->re != H0_) a->re = prev_a->re + rshift; else a->re = H0_;
+                    if (prev_a->qe != H0_) a->qe = prev_a->qe + qshift; else a->qe = H0_;
+                    // 重新计算seedcov（因为seed位置变了）
+                    if (a->rb != H0_ && a->qb != H0_ && a->qe != H0_ && a->re != H0_)
+                    {
+                        int i;
+                        for (i = 0, a->seedcov = 0; i < c->n; ++i)
+                        {
+                            const mem_seed_t *t = &c->seeds[i];
+                            if (t->qbeg >= a->qb && t->qbeg + t->len <= a->qe &&
+                                t->rbeg >= a->rb && t->rbeg + t->len <= a->re)
+                                a->seedcov += t->len;
+                        }
+                    }
+                    // 不创建SeqPair，不消耗SW计算
+                    // 更新cache信息（不更新，保持上一个有效seed的位置，让后续seed也和同一个比较）
+                    continue;
+                }
 
                 int flag = 0;
                 std::pair<int, int> pr;
@@ -2432,6 +2487,11 @@ void mem_chain2aln_across_reads_V2(const mem_opt_t *opt, const bntseq_t *bns,
                         }
                     }
                 }
+                // 更新SW缓存信息：记录当前seed作为后续seed的复用参考
+                cache_last_rbeg = s->rbeg;
+                cache_last_qbeg = s->qbeg;
+                cache_last_len = s->len;
+                cache_last_aln_idx = av->n - 1;
             }
             // tprof[MEM_ALN2_DOWN1][tid] += __rdtsc() - tim;
         }
