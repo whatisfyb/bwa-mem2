@@ -2202,13 +2202,50 @@ void mem_chain2aln_across_reads_V2(const mem_opt_t *opt, const bntseq_t *bns,
 
             lim_g[l+1] += c->n;
 
+            // 冗余SW消除：当同一chain内seed的延伸区域高度重叠时，
+            // 跳过冗余seed的SW计算。判断条件：
+            // 如果当前seed s2的ref/query位移都 < 上一个已处理seed长度的一半，
+            // 则s2的left/right extension区域被上一个seed的高度覆盖，
+            // 其alignment结果几乎相同，可安全跳过。
+            // 被跳过的seed的alnreg保留score=-1，后续mem_sort_dedup_patch会过滤。
+            int64_t dedup_last_rbeg = -1;
+            int32_t dedup_last_qbeg = -1;
+            int32_t dedup_last_len = 0;
+            int32_t seeds_skipped = 0;
+
             // uint64_t tim = __rdtsc();
             for (int k=c->n-1; k >= 0; k--)
             {
                 s = &c->seeds[(uint32_t)srt[k]];
 
+                // 冗余检测：如果当前seed与上一个已处理seed高度重叠，跳过SW
+                if (dedup_last_rbeg >= 0 && dedup_last_len > 0) {
+                    int64_t rdist = s->rbeg > dedup_last_rbeg ? s->rbeg - dedup_last_rbeg : dedup_last_rbeg - s->rbeg;
+                    int32_t qdist = s->qbeg > dedup_last_qbeg ? s->qbeg - dedup_last_qbeg : dedup_last_qbeg - s->qbeg;
+                    // 如果ref和query位移都小于seed长度的一半，延伸区域重叠>75%
+                    if (rdist < (int64_t)(dedup_last_len >> 1) && qdist < (dedup_last_len >> 1)) {
+                        // 跳过这个seed的SW计算，但仍创建alnreg记录（score=-1）
+                        seeds_skipped++;
+                        // 更新last seed（不更新，保持上一个有效seed的位置）
+                        // 注意：不更新last信息，让后续seed也和同一个有效seed比较
+                        continue;
+                    }
+                }
+
+                // 冗余检测：如果当前seed与上一个已处理seed高度重叠，跳过SW计算
+                // 仍然创建alnreg（score=-1），但不创建SeqPair，不消耗SW计算
+                int skip_sw = 0;
+                if (dedup_last_rbeg >= 0 && dedup_last_len > 0) {
+                    int64_t rdist = s->rbeg > dedup_last_rbeg ? s->rbeg - dedup_last_rbeg : dedup_last_rbeg - s->rbeg;
+                    int32_t qdist = s->qbeg > dedup_last_qbeg ? s->qbeg - dedup_last_qbeg : dedup_last_qbeg - s->qbeg;
+                    // 如果ref和query位移都小于seed长度的一半，延伸区域重叠>75%
+                    if (rdist < (int64_t)(dedup_last_len >> 1) && qdist < (dedup_last_len >> 1)) {
+                        skip_sw = 1;
+                        seeds_skipped++;
+                    }
+                }
+
                 mem_alnreg_t *a;
-                // a = kv_pushp(mem_alnreg_t, *av);
                 a = &av->a[av->n++];
                 memset(a, 0, sizeof(mem_alnreg_t));
 
@@ -2223,6 +2260,14 @@ void mem_chain2aln_across_reads_V2(const mem_opt_t *opt, const bntseq_t *bns,
                 a->rb = a->qb = a->re = a->qe = H0_;
 
                 tprof[PE19][tid] ++;
+
+                if (skip_sw) {
+                    // 跳过SW计算，但记录seed位置用于下一个seed的冗余判断
+                    dedup_last_rbeg = s->rbeg;
+                    dedup_last_qbeg = s->qbeg;
+                    dedup_last_len = s->len;
+                    continue;
+                }
 
                 int flag = 0;
                 std::pair<int, int> pr;
@@ -2432,8 +2477,11 @@ void mem_chain2aln_across_reads_V2(const mem_opt_t *opt, const bntseq_t *bns,
                         }
                     }
                 }
+                // 记录当前seed位置，用于下一个seed的冗余判断
+                dedup_last_rbeg = s->rbeg;
+                dedup_last_qbeg = s->qbeg;
+                dedup_last_len = s->len;
             }
-            // tprof[MEM_ALN2_DOWN1][tid] += __rdtsc() - tim;
         }
     }
     // tprof[MEM_ALN2_UP][tid] += __rdtsc() - timUP;
