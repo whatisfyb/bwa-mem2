@@ -28,6 +28,20 @@ Authors: Vasimuddin Md <vasimuddin.md@intel.com>; Sanchit Misra <sanchit.misra@i
 *****************************************************************************************/
 
 #include "bandedSWA.h"
+
+#if defined(KUNPENG_ARM64) && defined(__aarch64__)
+#include <arm_neon.h>
+// ARM64优化：用NEON原生指令替代_mm_movemask_epi8对int16向量的检查
+// 原代码用 _mm_movemask_epi8(cmp_result) & 0xAAAA 提取8个int16的sign bit
+// NEON替代：直接用水平规约指令检查条件
+// __m128i在KSL中是union，.vect_s16访问int16x8_t成员，.vect_u8访问uint8x16_t
+#define NEON_ALL_I16_SET(v) (vmaxvq_s16((v).vect_s16) == -1)   // 所有int16都是0xFFFF
+#define NEON_ALL_I16_ZERO(v) (vmaxvq_s16((v).vect_s16) == 0)   // 所有int16都是0
+#define NEON_ANY_I16_SET(v) (vmaxvq_s16((v).vect_s16) != 0)    // 至少一个int16非0
+// 8-bit版本：检查所有byte是否全0
+#define NEON_ALL_U8_ZERO(v) (vmaxvq_u8((v).vect_u8) == 0)
+#endif
+
 #ifdef VTUNE_ANALYSIS
 #include <ittnotify.h> 
 #endif
@@ -3882,9 +3896,17 @@ void BandedPairWiseSW::smithWaterman128_16(uint16_t seq1SoA[],
         // cmph &= cmpt;
         cmph = _mm_and_si128(cmph, cmpt);
         //__mmask16 cmp_ht = _mm_movepi16_mask(cmph);
-        __mmask16 cmp_ht = _mm_movemask_epi8(cmph) & dmask16;
+#if defined(KUNPENG_ARM64) && defined(__aarch64__)
+        bool cmp_ht_all = NEON_ALL_I16_SET(cmph);
+#endif
         
-        for (int l=beg; l<end && cmp_ht != dmask16; l++)
+        for (int l=beg; l<end
+#if defined(KUNPENG_ARM64) && defined(__aarch64__)
+             && !cmp_ht_all
+#else
+             && cmp_ht != dmask16
+#endif
+             ; l++)
         {
             __m128i h128 = _mm_load_si128((__m128i *)(H_h + l * SIMD_WIDTH16));
             __m128i f128 = _mm_load_si128((__m128i *)(F + l * SIMD_WIDTH16));
@@ -3894,8 +3916,12 @@ void BandedPairWiseSW::smithWaterman128_16(uint16_t seq1SoA[],
             __m128i cmp1 = _mm_cmpgt_epi16(head128, pj128);
             // uint32_t cval = _mm_movemask_epi16(cmp1);
             // uint16_t cval = _mm_movepi16_mask(cmp1);
+#if defined(KUNPENG_ARM64) && defined(__aarch64__)
+            if (NEON_ALL_I16_ZERO(cmp1)) break;
+#else
             uint16_t cval = _mm_movemask_epi8(cmp1) & dmask16;          
             if (cval == 0x00) break;
+#endif
             // __m128i cmp2 = _mm_cmpgt_epi16(pj128, tail128);
             __m128i cmp2 = _mm_cmpgt_epi16(j128, tail128);
             cmp1 = _mm_or_si128(cmp1, cmp2);
@@ -3995,8 +4021,12 @@ void BandedPairWiseSW::smithWaterman128_16(uint16_t seq1SoA[],
         __m128i bmaxScore128 = maxScore128;
         __m128i tmp = _mm_cmpeq_epi16(maxRS1, zero128);
         // uint16_t cval = _mm_movepi16_mask(tmp);
+#if defined(KUNPENG_ARM64) && defined(__aarch64__)
+        if (NEON_ALL_I16_SET(tmp)) break;
+#else
         uint16_t cval = _mm_movemask_epi8(tmp) & dmask16;
         if (cval == dmask16) break;
+#endif
 
         exit0 = _mm_blendv_epi16(exit0, zero128,  tmp);
 
@@ -4037,8 +4067,12 @@ void BandedPairWiseSW::smithWaterman128_16(uint16_t seq1SoA[],
             __m128i tmp = _mm_or_si128(f128, h128);
             tmp = _mm_cmpeq_epi16(tmp, zero128);
             // uint16_t val = _mm_movepi16_mask(tmp);
+#if defined(KUNPENG_ARM64) && defined(__aarch64__)
+            if (NEON_ALL_I16_SET(tmp)) nbeg = l;
+#else
             uint16_t val = _mm_movemask_epi8(tmp) & dmask16;
             if (val == dmask16) nbeg = l;
+#endif
             else
                 break;
         }
@@ -4052,8 +4086,12 @@ void BandedPairWiseSW::smithWaterman128_16(uint16_t seq1SoA[],
             __m128i tmp = _mm_or_si128(f128, h128);
             tmp = _mm_cmpeq_epi16(tmp, zero128);
             // uint16_t val = _mm_movepi16_mask(tmp);
+#if defined(KUNPENG_ARM64) && defined(__aarch64__)
+            if (!NEON_ALL_I16_SET(tmp) && flg)
+#else
             uint16_t val = _mm_movemask_epi8(tmp) & dmask16;
             if (val != dmask16 && flg)  
+#endif
                 break;
         }
         nend = l + 2 < ncol? l + 2: ncol;
@@ -4072,8 +4110,12 @@ void BandedPairWiseSW::smithWaterman128_16(uint16_t seq1SoA[],
             tmp = _mm_cmpeq_epi16(tmp, zero128);
             // uint32_t val = _mm_movemask_epi16(tmp);
             // uint16_t val = _mm_movepi16_mask(tmp);
+#if defined(KUNPENG_ARM64) && defined(__aarch64__)
+            if (NEON_ALL_I16_ZERO(tmp)) {
+#else
             uint16_t val = _mm_movemask_epi8(tmp) & dmask16;
             if (val == 0x00) {
+#endif
                 break;
             }
             tmp = _mm_and_si128(tmp,tmpb);
@@ -4100,8 +4142,12 @@ void BandedPairWiseSW::smithWaterman128_16(uint16_t seq1SoA[],
             tmp = _mm_cmpeq_epi16(tmp, zero128);            
             // uint32_t val = _mm_movemask_epi16(tmp);
             // uint16_t val = _mm_movepi16_mask(tmp);
+#if defined(KUNPENG_ARM64) && defined(__aarch64__)
+            if (NEON_ALL_I16_ZERO(tmp))  {
+#else
             uint16_t val = _mm_movemask_epi8(tmp) & dmask16;
             if (val == 0x00)  {
+#endif
                 break;
             }
             tmp = _mm_and_si128(tmp,tmpb);
@@ -4610,17 +4656,32 @@ void BandedPairWiseSW::smithWaterman128_8(uint8_t seq1SoA[],
         // cmph &= cmpt;
         cmph = _mm_and_si128(cmph, cmpt);
         // __mmask32 cmp_ht = _mm_movemask_epi8(cmph);
+#if defined(KUNPENG_ARM64) && defined(__aarch64__)
+        // cmph bytes: 0xFF=条件满足, 0x00=不满足。所有0xFF → vminvq_u8==0xFF
+        bool cmp_ht_all_u8 = (vminvq_u8(cmph.vect_u8) == 0xFF);
+#else
         __mmask16 cmp_ht = _mm_movemask_epi8(cmph);
+#endif
 
-        for (int l=beg; l<end && cmp_ht != dmask; l++)
+        for (int l=beg; l<end
+#if defined(KUNPENG_ARM64) && defined(__aarch64__)
+             && !cmp_ht_all_u8
+#else
+             && cmp_ht != dmask
+#endif
+             ; l++)
         {
             __m128i h128 = _mm_load_si128((__m128i *)(H_h + l * SIMD_WIDTH8));
             __m128i f128 = _mm_load_si128((__m128i *)(F + l * SIMD_WIDTH8));
 
             __m128i pj128 = _mm_set1_epi8(l);
             __m128i cmp1 = _mm_cmpgt_epi8(head128, pj128);
+#if defined(KUNPENG_ARM64) && defined(__aarch64__)
+            if (vmaxvq_u8(cmp1.vect_u8) == 0) break;
+#else
             uint32_t cval = _mm_movemask_epi8(cmp1);
             if (cval == 0x00) break;
+#endif
             __m128i cmp2 = _mm_cmpgt_epi8(pj128, tail128);
             cmp1 = _mm_or_si128(cmp1, cmp2);
             h128 = _mm_blendv_epi8(h128, zero128, cmp1);
@@ -4723,8 +4784,12 @@ void BandedPairWiseSW::smithWaterman128_8(uint8_t seq1SoA[],
         uint16_t cval = 0;
         __m128i bmaxScore128 = maxScore128;
         __m128i tmp = _mm_cmpeq_epi8(maxRS1, zero128);
+#if defined(KUNPENG_ARM64) && defined(__aarch64__)
+        if (vminvq_u8(tmp.vect_u8) == 0xFF) break;
+#else
         cval = _mm_movemask_epi8(tmp);
         if (cval == 0xFFFF) break;
+#endif
 
         // _mm_store_si128((__m128i *) temp, exit0);
         exit0 = _mm_blendv_epi8(exit0, zero128,  tmp);
@@ -4765,8 +4830,12 @@ void BandedPairWiseSW::smithWaterman128_8(uint8_t seq1SoA[],
             __m128i h128 = _mm_load_si128((__m128i *)(H_h + l * SIMD_WIDTH8));
             __m128i tmp = _mm_or_si128(f128, h128);
             tmp = _mm_cmpeq_epi8(tmp, zero128);
+#if defined(KUNPENG_ARM64) && defined(__aarch64__)
+            if (vminvq_u8(tmp.vect_u8) == 0xFF) nbeg = l;
+#else
             uint16_t val = _mm_movemask_epi8(tmp);
             if (val == 0xFFFF) nbeg = l;
+#endif
             else
                 break;
         }
@@ -4778,8 +4847,12 @@ void BandedPairWiseSW::smithWaterman128_8(uint8_t seq1SoA[],
             __m128i h128 = _mm_load_si128((__m128i *)(H_h + l * SIMD_WIDTH8));
             __m128i tmp = _mm_or_si128(f128, h128);
             tmp = _mm_cmpeq_epi8(tmp, zero128);
+#if defined(KUNPENG_ARM64) && defined(__aarch64__)
+            if (vminvq_u8(tmp.vect_u8) != 0xFF)
+#else
             uint16_t val = _mm_movemask_epi8(tmp);
             if (val != 0xFFFF)  
+#endif
                 break;
         }
         // int pnend =nend;
@@ -4798,8 +4871,12 @@ void BandedPairWiseSW::smithWaterman128_8(uint8_t seq1SoA[],
             //tmp = _mm_or_si128(tmp, _mm_xor_si128(exit0, ff128));
             tmp = _mm_or_si128(tmp, exit1);         
             tmp = _mm_cmpeq_epi8(tmp, zero128);
+#if defined(KUNPENG_ARM64) && defined(__aarch64__)
+            if (vmaxvq_u8(tmp.vect_u8) == 0) {
+#else
             uint32_t val = _mm_movemask_epi8(tmp);
             if (val == 0x00) {
+#endif
                 break;
             }
             tmp = _mm_and_si128(tmp,tmpb);
@@ -4822,8 +4899,12 @@ void BandedPairWiseSW::smithWaterman128_8(uint8_t seq1SoA[],
             __m128i tmp = _mm_or_si128(f128, h128);
             tmp = _mm_or_si128(tmp, exit1);
             tmp = _mm_cmpeq_epi8(tmp, zero128);         
+#if defined(KUNPENG_ARM64) && defined(__aarch64__)
+            if (vmaxvq_u8(tmp.vect_u8) == 0)  {
+#else
             uint32_t val = _mm_movemask_epi8(tmp);
             if (val == 0x00)  {
+#endif
                 break;
             }
 
