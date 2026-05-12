@@ -2244,18 +2244,27 @@ void mem_chain2aln_across_reads_V2(const mem_opt_t *opt, const bntseq_t *bns,
                 tprof[PE19][tid] ++;
 
                 if (reuse_sw) {
-                    // 复用策略：将此seed的alnreg标记为purge状态（qb=qe=-1）
-                    // 因为它与已处理的seed高度重叠，其alignment region会被
-                    // mem_sort_dedup_patch去重逻辑合并。标记为purge后，
-                    // 后续代码会正确跳过它，不产生多余的SAM输出。
-                    // 这保证了diff=0（purged alnreg不影响最终输出）。
-                    a->qb = -1;
-                    a->qe = -1;
+                    // 冗余seed与参考seed高度重叠，标记purge（qb=qe=-1）
+                    // 为了不影响sub score计算，只在冗余seed的初始score
+                    // 不高于参考seed时才purge（这样不会丢失sub候选）
+                    int seed_score = s->len * opt->a;
+                    // 参考seed已有alnreg的初始score
+                    // 由于SW还没执行，此时ref_a->score=-1，无法比较
+                    // 改用seed长度比较：当前seed不比参考seed长时才purge
+                    if (s->len <= cache_last_len) {
+                        a->qb = -1;
+                        a->qe = -1;
+                    } else {
+                        // 当前seed更长，需要保留，让SW正常计算
+                        // 但仍然不更新cache
+                        goto do_sw;
+                    }
                     // 不创建SeqPair，不消耗SW计算
                     // 不更新cache，让后续seed也和同一个有效seed比较
                     continue;
                 }
 
+                do_sw:
                 int flag = 0;
                 std::pair<int, int> pr;
                 if (s->qbeg)  // left extension
