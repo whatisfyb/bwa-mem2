@@ -126,8 +126,7 @@ kswr_t ksw_u8(kswq_t *q, int tlen, const uint8_t *target,
 
 #if defined(KUNPENG_ARM64) && defined(__aarch64__)
 #define __max_16(ret, xx) do { \
-		uint8x16_t _v = vreinterpretq_u8_s8(xx); \
-		(ret) = (int)vmaxvq_u8(_v); \
+		(ret) = (int)vmaxvq_u8((xx).vect_u8); \
 	} while (0)
 #else
 #define __max_16(ret, xx) do { \
@@ -204,9 +203,7 @@ kswr_t ksw_u8(kswq_t *q, int tlen, const uint8_t *target,
 				// 如果所有位置f<=h，则diff全0，可以退出
 				{
 					__m128i diff = _mm_subs_epu8(f, h);
-					uint8x16_t d = vreinterpretq_u8_s8(diff);  // __m128i在ARM上就是NEON类型
-					// 水平求min，如果为0则所有f<=h
-					uint8_t m = vminvq_u8(d);
+					uint8_t m = vminvq_u8(diff.vect_u8);
 					if (UNLIKELY(m == 0)) goto end_loop16;
 				}
 #else
@@ -267,8 +264,7 @@ kswr_t ksw_i16(kswq_t *q, int tlen, const uint8_t *target, int _o_del, int _e_de
 
 #if defined(KUNPENG_ARM64) && defined(__aarch64__)
 #define __max_8(ret, xx) do { \
-		int16x8_t _v = vreinterpretq_s16_s8(xx); \
-		(ret) = (int)vmaxvq_s16(_v); \
+		(ret) = (int)vmaxvq_s16((xx).vect_s16); \
 	} while (0)
 #else
 #define __max_8(ret, xx) do { \
@@ -331,9 +327,8 @@ kswr_t ksw_i16(kswq_t *q, int tlen, const uint8_t *target, int _o_del, int _e_de
 				// cmpgt_epi16: 如果f>h则对应位置为0xFFFF, 否则为0
 				// 如果没有任何f>h，则可以退出
 				{
-					int16x8_t cmp_vec = vreinterpretq_s16_s8(_mm_cmpgt_epi16(f, h));
-					// 水平OR，如果结果为0说明没有任何f>h
-					int16_t any_gt = vmaxvq_s16(cmp_vec);
+					__m128i cmp_vec = _mm_cmpgt_epi16(f, h);
+					int16_t any_gt = vmaxvq_s16(cmp_vec.vect_s16);
 					if (UNLIKELY(any_gt == 0)) goto end_loop8;
 				}
 #else
