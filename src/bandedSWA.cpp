@@ -3383,12 +3383,24 @@ void BandedPairWiseSW::smithWaterman512_16(uint16_t seq1SoA[],
 #if ((!__AVX512BW__) && (!__AVX2__) && (__SSE2__))
 
 // SSE2 =- 16 bit version
+#if defined(KUNPENG_ARM64) && defined(__aarch64__)
+/* NEON-native blendv_epi16: use vbslq_s16 directly instead of 3 AVX2NEON calls
+   (or+andnot+and). vbslq_s16 is a single instruction on ARMv8. */
+static inline __m128i
+_mm_blendv_epi16(__m128i x, __m128i y, __m128i mask)
+{
+    __m128i _r;
+    _r.vect_s16 = vbslq_s16(mask.vect_u16, y.vect_s16, x.vect_s16);
+    return _r;
+}
+#else
 static inline __m128i
 _mm_blendv_epi16(__m128i x, __m128i y, __m128i mask)
 {
     // Replace bit in x with bit in y when matching bit in mask is set:
     return _mm_or_si128(_mm_andnot_si128(mask, x), _mm_and_si128(mask, y));
 }
+#endif
 
 #define ZSCORE16(i4_128, y4_128)                                            \
     {                                                                   \
@@ -3406,6 +3418,36 @@ _mm_blendv_epi16(__m128i x, __m128i y, __m128i mask)
     }
 
 
+#if defined(KUNPENG_ARM64) && defined(__aarch64__)
+/* NEON-native MAIN_CODE16: eliminates AVX2NEON function call overhead by using
+   inline NEON intrinsics directly via __m128i union members (.vect_s16/.vect_u16).
+   Semantics are identical to the SSE2 version.
+   Note: NEON comparison intrinsics return uint16x8_t (not int16x8_t like SSE2). */
+#define MAIN_CODE16(s1, s2, h00, h11, e11, f11, f21, zero256, maxScore128, e_ins128, oe_ins128, e_del128, oe_del128, y128, maxRS) \
+    {                                                                   \
+        uint16x8_t _cmp11 = vceqq_s16((s1).vect_s16, (s2).vect_s16);   \
+        int16x8_t _sbt11 = vbslq_s16(_cmp11, (match128).vect_s16, (mismatch128).vect_s16); \
+        uint16x8_t _utmp = vmaxq_u16((s1).vect_u16, (s2).vect_u16);    \
+        uint16x8_t _ucmp2 = vceqq_u16(_utmp, (ff128).vect_u16);        \
+        _sbt11 = vbslq_s16(_ucmp2, (w_ambig_128).vect_s16, _sbt11);    \
+        int16x8_t _m11 = vaddq_s16((h00).vect_s16, _sbt11);            \
+        uint16x8_t _ucmp3 = vceqq_s16((h00).vect_s16, (zero128).vect_s16); \
+        _m11 = vbslq_s16(_ucmp3, (zero128).vect_s16, _m11);            \
+        int16x8_t _h11 = vmaxq_s16(_m11, (e11).vect_s16);              \
+        _h11 = vmaxq_s16(_h11, (f11).vect_s16);                         \
+        int16x8_t _temp = vsubq_s16(_m11, (oe_ins128).vect_s16);       \
+        int16x8_t _val = vmaxq_s16(_temp, (zero128).vect_s16);         \
+        int16x8_t _e11 = vsubq_s16((e11).vect_s16, (e_ins128).vect_s16); \
+        _e11 = vmaxq_s16(_val, _e11);                                    \
+        _temp = vsubq_s16(_m11, (oe_del128).vect_s16);                  \
+        _val = vmaxq_s16(_temp, (zero128).vect_s16);                    \
+        int16x8_t _f21 = vsubq_s16((f11).vect_s16, (e_del128).vect_s16); \
+        _f21 = vmaxq_s16(_val, _f21);                                    \
+        (h11).vect_s16 = _h11;                                           \
+        (e11).vect_s16 = _e11;                                           \
+        (f21).vect_s16 = _f21;                                           \
+    }
+#else
 #define MAIN_CODE16(s1, s2, h00, h11, e11, f11, f21, zero256,  maxScore128, e_ins128, oe_ins128, e_del128, oe_del128, y128, maxRS) \
     {                                                                   \
         __m128i cmp11 = _mm_cmpeq_epi16(s1, s2);                        \
@@ -3427,6 +3469,7 @@ _mm_blendv_epi16(__m128i x, __m128i y, __m128i mask)
         f21 = _mm_sub_epi16(f11, e_del128);                             \
         f21 = _mm_max_epi16(val128, f21);                               \
     }
+#endif
 
 
 inline void sortPairsLen(SeqPair *pairArray, int32_t count, SeqPair *tempArray,
