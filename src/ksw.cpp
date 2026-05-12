@@ -200,10 +200,10 @@ kswr_t ksw_u8(kswq_t *q, int tlen, const uint8_t *target,
 #if defined(KUNPENG_ARM64) && defined(__aarch64__)
 				// ARM64优化：用NEON intrinsics替代movemask检查f<=h
 				// _mm_subs_epu8(f,h) = 0 when f<=h, >0 when f>h
-				// 如果所有位置f<=h，则diff全0，可以退出
+				// cmp == 0xffff 表示所有16个位置f<=h，等价于max(diff)==0
 				{
 					__m128i diff = _mm_subs_epu8(f, h);
-					uint8_t m = vminvq_u8(diff.vect_u8);
+					uint8_t m = vmaxvq_u8(diff.vect_u8);
 					if (UNLIKELY(m == 0)) goto end_loop16;
 				}
 #else
