@@ -55,7 +55,7 @@ INCLUDES += $(AVX2KI_INCLUDES)
 # Kunpeng 920 uses 128-byte cache lines
 CPPFLAGS += -DCACHE_LINE_BYTES=128
 # Kunpeng 920 specific tuning
-ARCH_FLAGS += -march=armv8.2-a -mtune=tsv110
+ARCH_FLAGS += -march=armv8.2-a -mtune=tsv110 -fomit-frame-pointer
 else
 ARCH_FLAGS=	-msse -msse2 -msse3 -mssse3 -msse4.1
 endif
