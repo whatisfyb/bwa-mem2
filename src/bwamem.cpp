@@ -2104,6 +2104,17 @@ void mem_chain2aln_across_reads_V2(const mem_opt_t *opt, const bntseq_t *bns,
 
     int spos = 0;
 
+    // SW缓存复用：延迟purge记录
+    // seed循环中记录purge关系，SW完成后再执行purge
+    struct sw_purge_entry {
+        int seqid;        // 哪个read
+        int target_idx;   // 要purge的alnreg索引
+        int source_idx;   // 参考alnreg索引（用于传递sub score）
+    };
+    int sw_purge_cap = nseq * 4;
+    int sw_purge_count = 0;
+    sw_purge_entry *sw_purge = (sw_purge_entry *)malloc(sw_purge_cap * sizeof(sw_purge_entry));
+
     // uint64_t timUP = __rdtsc();
     for (int l=0; l<nseq; l++)
     {
@@ -2244,21 +2255,17 @@ void mem_chain2aln_across_reads_V2(const mem_opt_t *opt, const bntseq_t *bns,
                 tprof[PE19][tid] ++;
 
                 if (reuse_sw) {
-                    // 冗余seed与参考seed高度重叠，标记purge（qb=qe=-1）
-                    // 为了不影响sub score计算，只在冗余seed的初始score
-                    // 不高于参考seed时才purge（这样不会丢失sub候选）
-                    int seed_score = s->len * opt->a;
-                    // 参考seed已有alnreg的初始score
-                    // 由于SW还没执行，此时ref_a->score=-1，无法比较
-                    // 改用seed长度比较：当前seed不比参考seed长时才purge
-                    if (s->len <= cache_last_len) {
-                        a->qb = -1;
-                        a->qe = -1;
-                    } else {
-                        // 当前seed更长，需要保留，让SW正常计算
-                        // 但仍然不更新cache
-                        goto do_sw;
+                    // 标记此alnreg为待purge，SW完成后执行
+                    // 不立即purge，因为SW还没执行，score=-1
+                    // 也不创建SeqPair，省掉SW计算
+                    if (sw_purge_count >= sw_purge_cap) {
+                        sw_purge_cap *= 2;
+                        sw_purge = (sw_purge_entry *)realloc(sw_purge, sw_purge_cap * sizeof(sw_purge_entry));
                     }
+                    sw_purge[sw_purge_count].seqid = c->seqid;
+                    sw_purge[sw_purge_count].target_idx = av->n - 1;
+                    sw_purge[sw_purge_count].source_idx = cache_last_aln_idx;
+                    sw_purge_count++;
                     // 不创建SeqPair，不消耗SW计算
                     // 不更新cache，让后续seed也和同一个有效seed比较
                     continue;
@@ -2936,6 +2943,16 @@ void mem_chain2aln_across_reads_V2(const mem_opt_t *opt, const bntseq_t *bns,
                 numPairsLeft, numPairsRight, *wsize_pair);
         exit(EXIT_FAILURE);
     }
+
+    // SW缓存复用：延迟purge - SW已完成，现在可以安全purge
+    for (int r = 0; r < sw_purge_count; r++) {
+        mem_alnreg_v *av = &av_v[sw_purge[r].seqid];
+        mem_alnreg_t *target = &av->a[sw_purge[r].target_idx];
+        // Purge：标记为excluded，后续dedup_patch和输出会跳过
+        target->qb = -1;
+        target->qe = -1;
+    }
+    free(sw_purge);
 
     /* Discard seeds and hence their alignemnts */
 
