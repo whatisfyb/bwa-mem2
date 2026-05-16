@@ -100,6 +100,18 @@ extern "C" int _movemask_epi8_neon(uint8x16_t a);
 })
 
 /*
+ * _mm_blendv_epi16_inline: fully inlined blendv for 16-bit lanes using NEON vbsl.
+ * _mm_blendv_epi16(a, b, mask) = vbslq_u16(mask, b, a)
+ * Single NEON instruction, no function call overhead.
+ * Only use in tight inner loops (MAIN_CODE16 + j-loop body).
+ */
+#define _mm_blendv_epi16_inline(a, b, mask) __extension__({ \
+    __m128i _r; \
+    _r.vect_u16 = vbslq_u16((mask).vect_u16, (b).vect_u16, (a).vect_u16); \
+    _r; \
+})
+
+/*
  * _mm_movemask_epi8 macro override: INLINE expansion using NEON intrinsics.
  *
  * Previous approach (_movemask_epi8_neon function call) eliminated fmov overhead
