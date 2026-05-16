@@ -32,6 +32,9 @@
 #include <assert.h>
 #if defined(__ARM_NEON) || defined(__aarch64__)
 #include "simd_compat.h"
+#if defined(KUNPENG_ARM64)
+#include <arm_neon.h>
+#endif
 #else
 #include <emmintrin.h>
 #endif
@@ -121,6 +124,11 @@ kswr_t ksw_u8(kswq_t *q, int tlen, const uint8_t *target,
 	__m128i zero, oe_del, e_del, oe_ins, e_ins, shift, *H0, *H1, *E, *Hmax;
 	kswr_t r;
 
+#if defined(KUNPENG_ARM64) && defined(__aarch64__)
+#define __max_16(ret, xx) do { \
+		(ret) = (int)vmaxvq_u8((xx).vect_u8); \
+	} while (0)
+#else
 #define __max_16(ret, xx) do { \
 		(xx) = _mm_max_epu8((xx), _mm_srli_si128((xx), 8)); \
 		(xx) = _mm_max_epu8((xx), _mm_srli_si128((xx), 4)); \
@@ -128,6 +136,7 @@ kswr_t ksw_u8(kswq_t *q, int tlen, const uint8_t *target,
 		(xx) = _mm_max_epu8((xx), _mm_srli_si128((xx), 1)); \
     	(ret) = _mm_extract_epi16((xx), 0) & 0x00ff; \
 	} while (0)
+#endif
 
 	// initialization
 	r = g_defr;
@@ -188,8 +197,19 @@ kswr_t ksw_u8(kswq_t *q, int tlen, const uint8_t *target,
 				_mm_store_si128(H1 + j, h);
 				h = _mm_subs_epu8(h, oe_ins);
 				f = _mm_subs_epu8(f, e_ins);
+#if defined(KUNPENG_ARM64) && defined(__aarch64__)
+				// ARM64优化：用NEON intrinsics替代movemask检查f<=h
+				// _mm_subs_epu8(f,h) = 0 when f<=h, >0 when f>h
+				// cmp == 0xffff 表示所有16个位置f<=h，等价于max(diff)==0
+				{
+					__m128i diff = _mm_subs_epu8(f, h);
+					uint8_t m = vmaxvq_u8(diff.vect_u8);
+					if (UNLIKELY(m == 0)) goto end_loop16;
+				}
+#else
 				cmp = _mm_movemask_epi8(_mm_cmpeq_epi8(_mm_subs_epu8(f, h), zero));
 				if (UNLIKELY(cmp == 0xffff)) goto end_loop16;
+#endif
 			}
 		}
 end_loop16:
@@ -242,12 +262,18 @@ kswr_t ksw_i16(kswq_t *q, int tlen, const uint8_t *target, int _o_del, int _e_de
 	__m128i zero, oe_del, e_del, oe_ins, e_ins, *H0, *H1, *E, *Hmax;
 	kswr_t r;
 
+#if defined(KUNPENG_ARM64) && defined(__aarch64__)
+#define __max_8(ret, xx) do { \
+		(ret) = (int)vmaxvq_s16((xx).vect_s16); \
+	} while (0)
+#else
 #define __max_8(ret, xx) do { \
 		(xx) = _mm_max_epi16((xx), _mm_srli_si128((xx), 8)); \
 		(xx) = _mm_max_epi16((xx), _mm_srli_si128((xx), 4)); \
 		(xx) = _mm_max_epi16((xx), _mm_srli_si128((xx), 2)); \
     	(ret) = _mm_extract_epi16((xx), 0); \
 	} while (0)
+#endif
 
 	// initialization
 	r = g_defr;
@@ -296,7 +322,18 @@ kswr_t ksw_i16(kswq_t *q, int tlen, const uint8_t *target, int _o_del, int _e_de
 				_mm_store_si128(H1 + j, h);
 				h = _mm_subs_epu16(h, oe_ins);
 				f = _mm_subs_epu16(f, e_ins);
+#if defined(KUNPENG_ARM64) && defined(__aarch64__)
+				// ARM64优化：用NEON intrinsics替代movemask检查f>h
+				// cmpgt_epi16: 如果f>h则对应位置为0xFFFF, 否则为0
+				// 如果没有任何f>h，则可以退出
+				{
+					__m128i cmp_vec = _mm_cmpgt_epi16(f, h);
+					int16_t any_gt = vmaxvq_s16(cmp_vec.vect_s16);
+					if (UNLIKELY(any_gt == 0)) goto end_loop8;
+				}
+#else
 				if(UNLIKELY(!_mm_movemask_epi8(_mm_cmpgt_epi16(f, h)))) goto end_loop8;
+#endif
 			}
 		}
 end_loop8:
