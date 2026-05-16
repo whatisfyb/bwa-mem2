@@ -4138,8 +4138,12 @@ void BandedPairWiseSW::smithWaterman128_16(uint16_t seq1SoA[],
             /* scan2: check raw F|H for nend */
             if (!nend_found) {
                 __m128i raw_zero = _mm_cmpeq_epi16(fh, zero128);
+#if defined(KUNPENG_ARM64) && defined(__aarch64__)
+                if (!NEON_ALL_I16_SET(raw_zero)) {
+#else
                 uint16_t raw_val = _mm_movemask_epi8(raw_zero) & dmask16;
                 if (raw_val != dmask16) {
+#endif
                     nend_l = l;
                     nend_found = 1;
                 }
@@ -4149,60 +4153,10 @@ void BandedPairWiseSW::smithWaterman128_16(uint16_t seq1SoA[],
             __m128i tmp = _mm_or_si128(fh, exit1);
             tmp = _mm_cmpeq_epi16(tmp, zero128);
 #if defined(KUNPENG_ARM64) && defined(__aarch64__)
-            if (!NEON_ALL_I16_SET(tmp) && flg)
-#else
-            uint16_t val = _mm_movemask_epi8(tmp) & dmask16;
-            if (val != dmask16 && flg)  
-#endif
-                break;
-        }
-        nend = l + 2 < ncol? l + 2: ncol;
-
-        __m128i tmpb = ff128;
-
-        __m128i exit1 = _mm_xor_si128(exit0, ff128);
-        __m128i l128 = _mm_set1_epi16(beg);
-        for (l = beg; l < end; l++)
-        {
-            __m128i f128 = _mm_load_si128((__m128i *)(F + l * SIMD_WIDTH16));
-            __m128i h128 = _mm_load_si128((__m128i *)(H_h + l * SIMD_WIDTH16));
-    
-            __m128i tmp = _mm_or_si128(f128, h128);
-            tmp = _mm_or_si128(tmp, exit1);         
-            tmp = _mm_cmpeq_epi16(tmp, zero128);
-#if defined(KUNPENG_ARM64) && defined(__aarch64__)
             if (NEON_ALL_I16_ZERO(tmp)) {
 #else
             uint16_t val = _mm_movemask_epi8(tmp) & dmask16;
             if (val == 0x00) {
-#endif
-                break;
-            }
-            tmp = _mm_and_si128(tmp,tmpb);
-            l128 = _mm_add_epi16(l128, one128);
-            head128 = _mm_blendv_epi16_inline(head128, l128, tmp);
-
-            tmpb = tmp;         
-        }
-        // _mm_store_si128((__m128i *) head, head128);
-        
-        __m128i  index128 = tail128;
-        tmpb = ff128;
-
-        l128 = _mm_set1_epi16(end);
-        for (l = end; l >= beg; l--)
-        {
-            __m128i f128 = _mm_load_si128((__m128i *)(F + l * SIMD_WIDTH16));
-            __m128i h128 = _mm_load_si128((__m128i *)(H_h + l * SIMD_WIDTH16));
-            
-            __m128i tmp = _mm_or_si128(f128, h128);
-            tmp = _mm_or_si128(tmp, exit1);
-            tmp = _mm_cmpeq_epi16(tmp, zero128);            
-#if defined(KUNPENG_ARM64) && defined(__aarch64__)
-            if (NEON_ALL_I16_ZERO(tmp))  {
-#else
-            uint16_t val = _mm_movemask_epi8(tmp) & dmask16;
-            if (val == 0x00)  {
 #endif
                 break;
             }
