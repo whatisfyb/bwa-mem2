@@ -30,7 +30,11 @@
 #include <stdlib.h>
 #include <stdint.h>
 #include <assert.h>
+#if defined(__ARM_NEON) || defined(__aarch64__)
+#include "simd_compat.h"
+#else
 #include <emmintrin.h>
+#endif
 #include "ksw.h"
 #include "macro.h"
 

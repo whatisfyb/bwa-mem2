@@ -647,7 +647,13 @@ int mem_sam_pe_batch(const mem_opt_t *opt, mem_cache *mmc,
     for (int i=0; i<pcnt-pcnt8; i++)
         seqPairArray[pcnt + MAX_LINE_LEN - 1 - i] = seqPairArray[pcnt-i-1];
     
-#if __AVX512BW__    
+#if __AVX512BW__
+    pwsw->getScores8(seqPairArray, seqBufRef, seqBufQer, aln, pcnt8, nthreads, 0);
+    pwsw->getScores16(seqPairArray + pcnt8 + MAX_LINE_LEN, seqBufRef, seqBufQer,
+                      aln, pcnt-pcnt8, nthreads, 0);
+#elif defined(__ARM_NEON) || defined(__aarch64__)
+    // ARM NEON path: use SSE4.1-equivalent bandedSWA functions
+    // TODO: Phase 2 - implement native NEON kswv or use bandedSWA wrapper
     pwsw->getScores8(seqPairArray, seqBufRef, seqBufQer, aln, pcnt8, nthreads, 0);
     pwsw->getScores16(seqPairArray + pcnt8 + MAX_LINE_LEN, seqBufRef, seqBufQer,
                       aln, pcnt-pcnt8, nthreads, 0);
@@ -697,6 +703,10 @@ int mem_sam_pe_batch(const mem_opt_t *opt, mem_cache *mmc,
     assert(pos8 + pos16 == pcnt2);
 
 #if __AVX512BW__
+    pwsw->getScores16(seqPairArray + pos8, seqBufRef, seqBufQer, aln, pos16, nthreads, 1);
+    pwsw->getScores8(seqPairArray, seqBufRef, seqBufQer, aln, pos8, nthreads, 1);
+#elif defined(__ARM_NEON) || defined(__aarch64__)
+    // ARM NEON path: use SSE4.1-equivalent bandedSWA functions
     pwsw->getScores16(seqPairArray + pos8, seqBufRef, seqBufQer, aln, pos16, nthreads, 1);
     pwsw->getScores8(seqPairArray, seqBufRef, seqBufQer, aln, pos8, nthreads, 1);
 #else

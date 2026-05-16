@@ -36,12 +36,23 @@ Authors: Vasimuddin Md <vasimuddin.md@intel.com>; Sanchit Misra <sanchit.misra@i
 #include <assert.h>
 #include "macro.h"
 
-#if (__AVX512BW__ || __AVX2__)
+#if defined(__ARM_NEON) || defined(__aarch64__)
+#include "simd_compat.h"
+#elif (__AVX512BW__ || __AVX2__)
 #include <immintrin.h>
 #else
 #include <smmintrin.h>  // for SSE4.1
+#endif
+
+#if !defined(__AVX512BW__) && !defined(__AVX2__) && !defined(__ARM_NEON) && !defined(__aarch64__)
+// SSE4.1 path only: define mask types for compatibility with AVX512 code patterns
+// AVX2KI on ARM already provides __mmask8/16/32 as macros in avx2ki_type.h
+#ifndef __mmask8
 #define __mmask8 uint8_t
+#endif
+#ifndef __mmask16
 #define __mmask16 uint16_t
+#endif
 #endif
 
 #define MAX_SEQ_LEN_REF 256
@@ -55,25 +66,24 @@ Authors: Vasimuddin Md <vasimuddin.md@intel.com>; Sanchit Misra <sanchit.misra@i
 
 
 // SIMD_WIDTH in bits
-// AVX2
-#if ((!__AVX512BW__) & (__AVX2__))
-#define SIMD_WIDTH8 32
-#define SIMD_WIDTH16 16
-#endif
-
-// AVX512
-#if __AVX512BW__
-#define SIMD_WIDTH8 64
-#define SIMD_WIDTH16 32
-#endif
-
-#if ((!__AVX512BW__) & (!__AVX2__) & (__SSE2__))
+// ARM NEON (128-bit, equivalent to SSE4.1)
+#if defined(__ARM_NEON) || defined(__aarch64__)
 #define SIMD_WIDTH8 16
 #define SIMD_WIDTH16 8
-#endif
-
+// AVX2
+#elif ((!__AVX512BW__) & (__AVX2__))
+#define SIMD_WIDTH8 32
+#define SIMD_WIDTH16 16
+// AVX512
+#elif __AVX512BW__
+#define SIMD_WIDTH8 64
+#define SIMD_WIDTH16 32
+// SSE4.1/SSE2
+#elif ((!__AVX512BW__) & (!__AVX2__) & (__SSE2__))
+#define SIMD_WIDTH8 16
+#define SIMD_WIDTH16 8
 // Scalar
-#if ((!__AVX512BW__) & (!__AVX2__) & (!__SSE2__))
+#else
 #define SIMD_WIDTH8 1
 #define SIMD_WIDTH16 1
 #endif

@@ -48,6 +48,15 @@ int affy[256];
 extern uint64_t tprof[LIM_R][LIM_C];
 // ---------------
 
+#if defined(__aarch64__) || defined(__ARM_NEON)
+// ARM64: no cpuid, provide stub for HTStatus
+int HTStatus()
+{
+    // ARM does not have hyperthreading in the x86 sense
+    // Kunpeng 920 has 64 cores, 1 thread per core
+    return 0;
+}
+#else
 void __cpuid(unsigned int i, unsigned int cpuid[4]) {
 #ifdef _WIN32
     __cpuid((int *) cpuid, (int)i);
@@ -94,6 +103,7 @@ int HTStatus()
 
     return ht;
 }
+#endif /* __aarch64__ || __ARM_NEON */
 
 
 /*** Memory pre-allocations ***/
