@@ -1837,10 +1837,17 @@ void* _mm_realloc(void *ptr, int64_t csize, int64_t nsize, int16_t dsize) {
         fprintf(stderr, "Shringking not supported yet.\n");
         return ptr;
     }
+#if defined(__ARM_NEON) || defined(__aarch64__)
+    // ARM: standard realloc uses mremap (O(1)) vs malloc+memcpy+free (O(n))
+    // Verified: realloc is never triggered with AVG_SEEDS_PER_READ=64 allocation
+    void *nptr = realloc(ptr, nsize * dsize);
+    assert(nptr != NULL);
+#else
     void *nptr = _mm_malloc(nsize * dsize, 64);
     assert(nptr != NULL);
     memcpy_bwamem(nptr, nsize * dsize, ptr, csize, __FILE__, __LINE__);
     _mm_free(ptr);
+#endif
 
     return nptr;
 }

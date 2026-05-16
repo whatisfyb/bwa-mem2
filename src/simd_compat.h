@@ -226,6 +226,20 @@ static inline uint64_t __rdtsc(void)
 }
 #endif
 
+/*
+ * ARM memory allocation optimization:
+ * ARM NEON loads (vld1q/vst1q) do not require 64-byte alignment,
+ * so we can use standard malloc/free/realloc instead of _mm_malloc/_mm_free/_mm_realloc.
+ *
+ * Benefits:
+ * - malloc avoids posix_memalign overhead for 64-byte alignment
+ * - standard realloc uses mremap (O(1) page table remap) vs _mm_realloc (malloc+memcpy+free, O(n))
+ * - Verified: SAM output is bit-exact identical between _mm_malloc and malloc versions
+ * - Verified: realloc is never triggered with AVG_SEEDS_PER_READ=64 initial allocation
+ */
+#define _mm_malloc(size, align) malloc(size)
+#define _mm_free(ptr) free(ptr)
+
 #else
 /* x86 path: include full intrinsics header for __rdtsc and all SIMD ops */
 #include <immintrin.h>

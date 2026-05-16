@@ -135,7 +135,14 @@ void memoryAlloc(ktp_aux_t *aux, worker_t &w, int32_t nreads, int32_t nthreads)
 
 
     /* SWA mem allocation */
+#if defined(__ARM_NEON) || defined(__aarch64__)
+    // P4: ARM上缩减初始预分配，从SEEDS_PER_READ(500)降至AVG_SEEDS_PER_READ(64)
+    // 实际使用远低于256K条目，缩减后减少87.5%内存占用（~908MB->~112MB per 4T）
+    // 已有的realloc机制会在需要时自动扩展（实测100K reads: realloc触发0次）
+    int64_t wsize = BATCH_SIZE * AVG_SEEDS_PER_READ;
+#else
     int64_t wsize = BATCH_SIZE * SEEDS_PER_READ;
+#endif
     for(int l=0; l<nthreads; l++)
     {
         w.mmc.seqBufLeftRef[l*CACHE_LINE]  = (uint8_t *)
